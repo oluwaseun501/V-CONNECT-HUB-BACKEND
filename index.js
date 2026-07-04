@@ -20,18 +20,18 @@ startOrderCron();
 
 const app = express();
 
-
+app.use(cors({ origin: '*' }));
 app.use(helmet());
 app.use(rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 100, // max 100 requests per IP
+    windowMs: 15 * 60 * 1000,
+    max: 100,
     message: { message: 'Too many requests, please try again later' }
 }));
 
-app.use(cors({ origin: '*' }));
 app.use('/api/wallet/webhook/paystack', express.raw({ type: 'application/json' }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
 
 app.use('/api/users', authRoutes);
 app.use('/api/wallet', walletRoutes);
