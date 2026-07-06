@@ -139,7 +139,18 @@ const loginUser = async (req, res) => {
 const getMe = async (req, res) => {
     try {
         const user = await User.findById(req.user._id).select('-password');
-        res.status(200).json(user);
+
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        const userObj = user.toObject();
+        const { transactionPin, ...safeUser } = userObj;
+
+        res.status(200).json({
+            ...safeUser,
+            hasPin: !!transactionPin,
+        });
     } catch (error) {
         res.status(500).json({ message: error.message });
     }
@@ -335,7 +346,7 @@ const setTransactionPin = async (req, res) => {
 
         await User.findByIdAndUpdate(req.user._id, { transactionPin: hashedPin });
 
-        res.status(200).json({ message: 'Transaction PIN set successfully' });
+        res.status(200).json({ message: 'Transaction PIN set successfully', hasPin: true });
     } catch (error) {
         res.status(500).json({ message: error.message });
     }

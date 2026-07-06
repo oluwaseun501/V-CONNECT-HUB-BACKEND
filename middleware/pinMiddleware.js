@@ -3,7 +3,7 @@ const bcrypt = require('bcryptjs');
 
 const pinMiddleware = async (req, res, next) => {
     try {
-        const { transactionPin } = req.body;
+        const transactionPin = req.headers['x-transaction-pin'];
 
         if (!transactionPin) {
             return res.status(400).json({ message: 'Transaction PIN is required' });
