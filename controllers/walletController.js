@@ -7,13 +7,13 @@ const { initializeKorapayTransaction, verifyKorapayTransaction } = require('../s
 
 const transferFunds = async (req, res) => {
     try {
-        const { email, amount } = req.body;
+        const { recipientEmail: email, amount } = req.body;
 
         if (!email || !amount) {
             return res.status(400).json({ message: 'Please provide email and amount' });
         }
 
-        const receiver = await User.findOne({ email });
+        const receiver = await User.findOne({ email: new RegExp(`^${email.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') });
 
         if (!receiver) {
             return res.status(404).json({ message: 'Receiver not found' });
@@ -251,7 +251,25 @@ const getTransactionHistory = async (req, res) => {
     }
 };
 
+const lookupUser = async (req, res) => {
+    try {
+        const email = (req.query.email || '').trim();
+        if (!email) return res.status(400).json({ message: 'Email is required' });
+
+        const user = await User.findOne({
+            email: new RegExp(`^${email.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i')
+        });
+
+        if (!user) return res.status(404).json({ message: 'No account found with this email.' });
+
+        // Don't expose sensitive fields — return only what the sender needs to see
+        res.json({ name: user.name, email: user.email });
+    } catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+};
+
 module.exports = { 
     transferFunds, initiateFunding, verifyFunding, paystackWebhook, getTransactionHistory,
-    initiateKorapayFunding, verifyKorapayFunding, korapayWebhook
+    initiateKorapayFunding, verifyKorapayFunding, korapayWebhook, lookupUser
 };

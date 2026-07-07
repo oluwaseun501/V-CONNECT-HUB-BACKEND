@@ -3,7 +3,7 @@ const router = express.Router();
 const { protect } = require('../middleware/authMiddleware');
 const { pinMiddleware } = require('../middleware/pinMiddleware');
 // const { verifiedMiddleware } = require('../middleware/verifiedMiddleware');
-const { transferFunds, initiateFunding, verifyFunding, paystackWebhook, getTransactionHistory, initiateKorapayFunding, verifyKorapayFunding, korapayWebhook } = require('../controllers/walletController');
+const { transferFunds, initiateFunding, verifyFunding, paystackWebhook, getTransactionHistory, initiateKorapayFunding, verifyKorapayFunding, korapayWebhook, lookupUser } = require('../controllers/walletController');
 
 
 router.post('/webhook/paystack', paystackWebhook);
@@ -14,6 +14,7 @@ router.use(protect);
 router.get('/verify/:reference', verifyFunding);
 router.get('/transactions', getTransactionHistory);
 router.post('/fund/korapay', initiateKorapayFunding);
+router.get('/lookup-user', lookupUser);
 router.get('/verify/korapay/:reference', verifyKorapayFunding);
 
 // Fund wallet — requires verified email
