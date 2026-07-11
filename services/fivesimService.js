@@ -1,52 +1,92 @@
-const FIVESIM_BASE = 'https://5sim.net/v1';
+const Provider = require('../models/Provider');
 
-const getHeaders = () => ({
-    Authorization: `Bearer ${process.env.FIVESIM_API_KEY}`,
-    Accept: 'application/json'
-});
+async function getActiveProvider() {
+  const provider = await Provider.findOne({ isActive: true });
+  if (!provider) throw new Error('No active provider set. Go to Admin → API Providers and set one as active.');
+  return provider;
+}
 
 const getAvailableCountries = async () => {
-    const res = await fetch(`${FIVESIM_BASE}/guest/countries`, { headers: { Accept: 'application/json' } });
-    if (!res.ok) throw new Error('Failed to fetch countries from 5sim');
-    return res.json();
+  const { baseUrl } = await getActiveProvider();
+  const res = await fetch(`${baseUrl}/guest/countries`, { headers: { Accept: 'application/json' } });
+  if (!res.ok) throw new Error('Failed to fetch countries from provider');
+  return res.json();
 };
 
 const getAvailableProducts = async (country, operator = 'any') => {
-    const res = await fetch(`${FIVESIM_BASE}/guest/products/${country}/${operator}`, {
-        headers: { Accept: 'application/json' }
-    });
-    if (!res.ok) throw new Error('Failed to fetch products from 5sim');
-    return res.json();
+  const { baseUrl, apiKey } = await getActiveProvider();
+
+  const headers = { Accept: 'application/json' };
+  if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+
+  const res = await fetch(`${baseUrl}/guest/products/${country}/${operator}`, { headers });
+
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`Failed to fetch products from provider (${res.status}): ${body}`);
+  }
+
+  const raw = await res.json();
+
+  // 5sim returns { service: { operatorName: { Price, Qty } } } for specific operators
+  // but { service: { Price, Qty, Category } } for 'any' (flat, no operator level).
+  // Normalise both into { service: { operatorName: { Price, Qty } } }.
+  const normalised = {};
+  for (const [service, value] of Object.entries(raw)) {
+    if (!value || typeof value !== 'object') continue;
+
+    // Detect flat format: has a numeric Price directly on the value
+    const isFlat = typeof value.Price === 'number' || typeof value.price === 'number';
+
+    if (isFlat) {
+      // Wrap it so the caller's inner loop works uniformly
+      normalised[service] = { [operator]: value };
+    } else {
+      normalised[service] = value;
+    }
+  }
+
+  return normalised;
 };
 
 const purchaseNumber = async (country, operator, product) => {
-    const res = await fetch(`${FIVESIM_BASE}/user/buy/activation/${country}/${operator}/${product}`, {
-        method: 'GET',
-        headers: getHeaders()
-    });
-    if (!res.ok) {
-        const err = await res.text();
-        throw new Error(`5sim error (${res.status}): ${err || 'no details'}`);
-    }
-    return res.json();
+  const { baseUrl, apiKey } = await getActiveProvider();
+  const res = await fetch(`${baseUrl}/user/buy/activation/${country}/${operator}/${product}`, {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' }
+  });
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Provider error (${res.status}): ${err || 'no details'}`);
+  }
+  return res.json();
 };
 
 const checkOrder = async (orderId) => {
-    const res = await fetch(`${FIVESIM_BASE}/user/check/${orderId}`, { headers: getHeaders() });
-    if (!res.ok) throw new Error('Failed to check order from 5sim');
-    return res.json();
+  const { baseUrl, apiKey } = await getActiveProvider();
+  const res = await fetch(`${baseUrl}/user/check/${orderId}`, {
+    headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' }
+  });
+  if (!res.ok) throw new Error('Failed to check order');
+  return res.json();
 };
 
 const cancelOrder = async (orderId) => {
-    const res = await fetch(`${FIVESIM_BASE}/user/cancel/${orderId}`, { headers: getHeaders() });
-    if (!res.ok) throw new Error('Failed to cancel order');
-    return res.json();
+  const { baseUrl, apiKey } = await getActiveProvider();
+  const res = await fetch(`${baseUrl}/user/cancel/${orderId}`, {
+    headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' }
+  });
+  if (!res.ok) throw new Error('Failed to cancel order');
+  return res.json();
 };
 
 const finishOrder = async (orderId) => {
-    const res = await fetch(`${FIVESIM_BASE}/user/finish/${orderId}`, { headers: getHeaders() });
-    if (!res.ok) throw new Error('Failed to finish order');
-    return res.json();
+  const { baseUrl, apiKey } = await getActiveProvider();
+  const res = await fetch(`${baseUrl}/user/finish/${orderId}`, {
+    headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' }
+  });
+  if (!res.ok) throw new Error('Failed to finish order');
+  return res.json();
 };
 
 module.exports = { getAvailableCountries, getAvailableProducts, purchaseNumber, checkOrder, cancelOrder, finishOrder };

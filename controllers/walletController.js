@@ -24,7 +24,17 @@ const transferFunds = async (req, res) => {
         }
 
         await debitWallet(req.user._id, Number(amount), `Transfer to ${receiver.email}`);
-        await creditWallet(receiver._id, Number(amount), `Transfer from ${req.user.email}`);
+await creditWallet(receiver._id, Number(amount), `Transfer from ${req.user.email}`);
+
+// Mark both transactions as transfer type so they show correctly in admin
+await Transaction.updateOne(
+    { user: req.user._id, description: `Transfer to ${receiver.email}`, status: 'successful' },
+    { $set: { type: 'transfer' } }
+);
+await Transaction.updateOne(
+    { user: receiver._id, description: `Transfer from ${req.user.email}`, status: 'successful' },
+    { $set: { type: 'transfer' } }
+);
 
         return res.status(200).json({ message: 'Transfer successful' });
 
@@ -92,7 +102,7 @@ const verifyFunding = async (req, res) => {
         const user = await User.findOne({ email: result.email });
         if (!user) return res.status(404).json({ message: 'User not found' });
 
-        user.balance += result.amount;
+        user.balance = Number(user.balance) + Number(result.amount);
         await user.save();
 
         await Transaction.findOneAndUpdate({ reference }, { status: 'successful' });
@@ -159,7 +169,7 @@ const verifyKorapayFunding = async (req, res) => {
         const user = await User.findOne({ email: result.email });
         if (!user) return res.status(404).json({ message: 'User not found' });
 
-        user.balance += result.amount;
+        user.balance = Number(user.balance) + Number(result.amount);
         await user.save();
 
         await Transaction.findOneAndUpdate({ reference }, { status: 'successful' });
@@ -183,7 +193,7 @@ const korapayWebhook = async (req, res) => {
         const user = await User.findOne({ email: data.customer?.email });
         if (!user) return;
 
-        user.balance += data.amount;
+        user.balance = Number(user.balance) + Number(data.amount);
         await user.save();
 
         await Transaction.findOneAndUpdate(
@@ -219,7 +229,7 @@ const paystackWebhook = async (req, res) => {
         if (!user) return;
 
         const amount = data.amount / 100;
-        user.balance += amount;
+        user.balance = Number(user.balance) + amount;
         await user.save();
 
         await Transaction.findOneAndUpdate(

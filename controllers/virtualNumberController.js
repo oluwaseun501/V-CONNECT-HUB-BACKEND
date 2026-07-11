@@ -1,4 +1,7 @@
-const VirtualOrder = require('../models/VirtualOrder');
+const VirtualOrder  = require('../models/VirtualOrder');
+const Provider      = require('../models/Provider');
+const PriceOverride = require('../models/PriceOverride');
+const SiteConfig    = require('../models/SiteConfig');
 const { debitWallet, creditWallet } = require('../services/walletService');
 const {
     getAvailableCountries,
@@ -20,9 +23,38 @@ const listCountries = async (req, res) => {
 
 const listProducts = async (req, res) => {
     try {
-        const { country, operator = 'any' } = req.params;
+        const { country, operator = 'virtual' } = req.params;
+
+        const provider      = await Provider.findOne({ isActive: true });
+        const markupPercent = provider?.markupPercent ?? 0;
+
+        const siteConfig = await SiteConfig.findOne();
+        const usdToNgn   = siteConfig?.usdToNgn ?? 1600;
+
+        // Load all overrides for this country
+        const overrides = await PriceOverride.find({ country: country.toLowerCase() });
+        const overrideMap = {};
+        overrides.forEach(o => { overrideMap[o.service] = o.price; });
+
         const products = await getAvailableProducts(country, operator);
-        res.status(200).json(products);
+
+        const normalized = {};
+        for (const [service, operators] of Object.entries(products)) {
+            if (!operators || typeof operators !== 'object') continue;
+            normalized[service] = {};
+            for (const [op, data] of Object.entries(operators)) {
+                const rawPrice = data?.Price ?? data?.price ?? data?.cost ?? 0;
+
+                // Use override if set, otherwise apply usdToNgn + markup
+                const finalPrice = overrideMap[service.toLowerCase()] != null
+                    ? overrideMap[service.toLowerCase()]
+                    : parseFloat((rawPrice * usdToNgn * (1 + markupPercent / 100)).toFixed(2));
+
+                normalized[service][op] = { ...data, Price: finalPrice };
+            }
+        }
+
+        res.status(200).json(normalized);
     } catch (error) {
         res.status(500).json({ message: error.message });
     }
@@ -30,23 +62,41 @@ const listProducts = async (req, res) => {
 
 const buyNumber = async (req, res) => {
     try {
-        const { country, operator = 'any', product } = req.body;
+        const { country, operator = 'virtual', product } = req.body;
         if (!country || !product) {
             return res.status(400).json({ message: 'country and product are required' });
         }
 
+        const provider      = await Provider.findOne({ isActive: true });
+        const markupPercent = provider?.markupPercent ?? 0;
+
+        const siteConfig = await SiteConfig.findOne();
+        const usdToNgn   = siteConfig?.usdToNgn ?? 1600;
+
         const orderData = await purchaseNumber(country, operator, product);
-        await debitWallet(req.user._id, orderData.price, `Virtual number — ${product} (${country})`);
+        const basePrice = orderData.price ?? orderData.Price ?? 0;
+
+        // Check for a price override first
+        const override = await PriceOverride.findOne({
+            service: product.toLowerCase(),
+            country: country.toLowerCase()
+        });
+
+        const finalPrice = override
+            ? override.price
+            : parseFloat((basePrice * usdToNgn * (1 + markupPercent / 100)).toFixed(2));
+
+        await debitWallet(req.user._id, finalPrice, `Virtual number — ${product} (${country})`);
 
         const order = await VirtualOrder.create({
-            user: req.user._id,
-            orderId: orderData.id,
-            phone: orderData.phone,
+            user:      req.user._id,
+            orderId:   orderData.id,
+            phone:     orderData.phone,
             country,
-            operator: orderData.operator,
+            operator:  orderData.operator,
             product,
-            price: orderData.price,
-            status: orderData.status?.toUpperCase() || 'PENDING',
+            price:     finalPrice,
+            status:    orderData.status?.toUpperCase() || 'PENDING',
             expiresAt: orderData.expires ? new Date(orderData.expires) : undefined
         });
 
@@ -79,10 +129,9 @@ const cancelNumberOrder = async (req, res) => {
         const order = await VirtualOrder.findOne({ orderId: Number(orderId), user: req.user._id });
         if (!order) return res.status(404).json({ message: 'Order not found' });
 
-        // Check live status from 5sim — prevent refund if SMS already received
-        const liveOrder = await checkOrder(Number(orderId));
+        const liveOrder  = await checkOrder(Number(orderId));
         const liveStatus = liveOrder.status?.toUpperCase();
-        order.status = liveStatus || order.status;
+        order.status     = liveStatus || order.status;
         if (liveOrder.sms?.length) order.sms = liveOrder.sms;
         await order.save();
 
@@ -119,11 +168,11 @@ const finishNumberOrder = async (req, res) => {
 
 const getMyOrders = async (req, res) => {
     try {
-        const page = parseInt(req.query.page) || 1;
-        const limit = parseInt(req.query.limit) || 20;
-        const skip = (page - 1) * limit;
+        const page   = parseInt(req.query.page)  || 1;
+        const limit  = parseInt(req.query.limit) || 20;
+        const skip   = (page - 1) * limit;
         const orders = await VirtualOrder.find({ user: req.user._id }).sort({ createdAt: -1 }).skip(skip).limit(limit);
-        const total = await VirtualOrder.countDocuments({ user: req.user._id });
+        const total  = await VirtualOrder.countDocuments({ user: req.user._id });
         res.status(200).json({ orders, total, page, pages: Math.ceil(total / limit) });
     } catch (error) {
         res.status(500).json({ message: error.message });
