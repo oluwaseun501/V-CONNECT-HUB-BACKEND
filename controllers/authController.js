@@ -57,7 +57,6 @@ const googleLogin = async (req, res) => {
             return res.status(400).json({ message: 'Google credential is required' });
         }
 
-        // Verify the ID token with Google
         const ticket = await googleClient.verifyIdToken({
             idToken: credential,
             audience: process.env.GOOGLE_CLIENT_ID
@@ -66,19 +65,19 @@ const googleLogin = async (req, res) => {
         const payload = ticket.getPayload();
         const { sub: googleId, email, name, picture } = payload;
 
-        // Find by googleId first, then by email (link existing account)
         let user = await User.findOne({ googleId });
+        let isNewUser = false; // ← track this
 
         if (!user) {
             user = await User.findOne({ email });
 
             if (user) {
-                // Link Google to existing email/password account
+                // Existing user — link Google to their account
                 user.googleId = googleId;
                 if (!user.avatar) user.avatar = picture;
                 await user.save();
             } else {
-                // New user — create account (no password, email auto-verified)
+                // Brand new user
                 user = await User.create({
                     name,
                     email,
@@ -86,6 +85,7 @@ const googleLogin = async (req, res) => {
                     avatar: picture,
                     isEmailVerified: true
                 });
+                isNewUser = true; // ← mark as new
                 try { await sendWelcomeEmail(name, email); } catch (e) {}
             }
         }
@@ -98,14 +98,14 @@ const googleLogin = async (req, res) => {
             balance: user.balance,
             isAdmin: user.isAdmin,
             isEmailVerified: user.isEmailVerified,
-            token: generateToken(user._id)
+            token: generateToken(user._id),
+            isNewUser, // ← add this
         });
 
     } catch (error) {
         res.status(401).json({ message: 'Google authentication failed: ' + error.message });
     }
 };
-
 
 
 

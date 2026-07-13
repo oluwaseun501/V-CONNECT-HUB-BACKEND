@@ -13,22 +13,24 @@ const transporter = nodemailer.createTransport({
 
 const sendWelcomeEmail = async (name, email) => {
   const mailOptions = {
-    from: `"V Connect Hub" <${process.env.EMAIL_USER}>`,
+    from: `"VConnectHub" <${process.env.EMAIL_USER}>`,
     to: email,
-    subject: 'Welcome to V Connect Hub! 🎉',
+    subject: 'Welcome to VConnectHub! 🎉',
     html: `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-        <h2 style="color: #2563eb;">Welcome to V Connect Hub, ${name}! 🎉</h2>
-        <p>Thank you for registering. Your account has been created successfully.</p>
-        <p>You can now enjoy our services:</p>
+        <h2 style="color: #7c3aed;">Welcome to VConnectHub, ${name}! 🎉</h2>
+        <p>Thank you for creating an account. You're all set to start using virtual numbers instantly.</p>
+        <p>Here's what you can do on VConnectHub:</p>
         <ul>
-          <li>Buy Airtime & Data</li>
-          <li>Pay Bills</li>
-          <li>And much more!</li>
+          <li>Get virtual phone numbers from countries worldwide</li>
+          <li>Receive OTP codes for app & service verification</li>
+          <li>Stay anonymous — no SIM card needed</li>
+          <li>Fund your wallet and buy numbers in seconds</li>
         </ul>
-        <p>If you have any questions, reply to this email.</p>
+        <p>To get started, log in to your dashboard and choose a country and service.</p>
+        <p>If you have any questions, reply to this email and we'll be happy to help.</p>
         <br/>
-        <p>Best regards,<br/><strong>V Connect Hub Team</strong></p>
+        <p>Best regards,<br/><strong>The VConnectHub Team</strong></p>
       </div>
     `
   };
