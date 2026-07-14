@@ -14,6 +14,11 @@ const virtualNumberRoutes = require('./routes/virtualNumberRoutes');
 const providerRoutes = require('./routes/providerRoutes');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
+const smmProviderRoutes = require('./routes/smmProviderRoutes');
+const boostingRoutes = require('./routes/boostingRoutes');
+
+
+
 
 connectDB();
 startOrderCron();
@@ -32,6 +37,8 @@ app.use('/api/wallet/webhook/paystack', express.raw({ type: 'application/json' }
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+app.use('/api/admin/smm-providers', smmProviderRoutes);
+app.use('/api/boost', boostingRoutes);
 
 app.use('/api/users', authRoutes);
 app.use('/api/wallet', walletRoutes);
