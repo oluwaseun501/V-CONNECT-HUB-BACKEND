@@ -39,7 +39,7 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 app.use('/api/admin/smm-providers', smmProviderRoutes);
-app.use('/api/boost', boostingRoutes);
+app.use('/boost', boostingRoutes);
 
 app.use('/api/users', authRoutes);
 app.use('/api/wallet', walletRoutes);

@@ -4,7 +4,7 @@ const { protect, admin } = require('../middleware/authMiddleware');
 const {
     getAllSMMProviders, addSMMProvider, updateSMMProvider,
     setActiveSMMProvider, deleteSMMProvider,
-    syncSMMServices, getSMMServices, updateSMMService
+    syncSMMServices, getSMMServices, updateSMMService, getSMMCategories
 } = require('../controllers/smmProviderController');
 
 router.use(protect, admin);
@@ -20,5 +20,7 @@ router.delete('/:id', deleteSMMProvider);
 router.post('/services/sync', syncSMMServices);
 router.get('/services', getSMMServices);
 router.patch('/services/:id', updateSMMService);
+router.get('/services/categories', getSMMCategories);
+
 
 module.exports = router;
