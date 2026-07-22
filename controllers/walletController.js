@@ -182,9 +182,24 @@ const verifyKorapayFunding = async (req, res) => {
 
 const korapayWebhook = async (req, res) => {
     try {
+        // Verify signature — same pattern as Paystack
+        const signature = req.headers['x-korapay-signature'];
+        const rawBody = req.body;
+
+        const hash = require('crypto')
+            .createHmac('sha256', process.env.KORAPAY_SECRET_KEY)
+            .update(rawBody)
+            .digest('hex');
+
+        if (hash !== signature) {
+            return res.status(400).json({ message: 'Invalid signature' });
+        }
+
         res.status(200).json({ message: 'Webhook received' });
 
-        const { event, data } = req.body;
+        const payload = JSON.parse(rawBody.toString());
+        const { event, data } = payload;
+
         if (event !== 'charge.success') return;
 
         const existing = await Transaction.findOne({ reference: data.reference, status: 'successful' });

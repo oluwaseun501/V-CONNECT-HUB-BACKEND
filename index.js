@@ -34,6 +34,7 @@ app.use(rateLimit({
 }));
 
 app.use('/api/wallet/webhook/paystack', express.raw({ type: 'application/json' }));
+app.use('/api/wallet/webhook/korapay', express.raw({ type: 'application/json' }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 

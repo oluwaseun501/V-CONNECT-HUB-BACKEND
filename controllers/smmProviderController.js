@@ -86,10 +86,13 @@ const syncSMMServices = async (req, res) => {
         const provider = await SMMProvider.findOne({ isActive: true });
         if (!provider) return res.status(404).json({ message: 'No active SMM provider found' });
 
-        const response = await axios.post(provider.apiUrl, {
-            key: provider.apiKey,
-            action: 'services'
-        });
+        const response = await axios.post(provider.apiUrl, 
+    new URLSearchParams({
+        key: provider.apiKey,
+        action: 'services'
+    }),
+    { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+);
 
         const services = response.data;
         if (!Array.isArray(services)) return res.status(400).json({ message: 'Unexpected response from provider' });
