@@ -6,22 +6,22 @@ const cors = require('cors');
 const connectDB = require('./config/db');
 const { startOrderCron } = require('./utils/orderCron');
 
-const authRoutes = require('./routes/authRoutes');
-const walletRoutes = require('./routes/walletRoutes');
-const transactionRoutes = require('./routes/transactionRoutes');
-const adminRoutes = require('./routes/adminRoutes');
-const virtualNumberRoutes = require('./routes/virtualNumberRoutes');
-const providerRoutes = require('./routes/providerRoutes');
-const helmet = require('helmet');
-const rateLimit = require('express-rate-limit');
-const smmProviderRoutes = require('./routes/smmProviderRoutes');
-const boostingRoutes = require('./routes/boostingRoutes');
+const authRoutes           = require('./routes/authRoutes');
+const walletRoutes         = require('./routes/walletRoutes');
+const transactionRoutes    = require('./routes/transactionRoutes');
+const adminRoutes          = require('./routes/adminRoutes');
+const virtualNumberRoutes  = require('./routes/virtualNumberRoutes');
+const providerRoutes       = require('./routes/providerRoutes');
+const helmet               = require('helmet');
+const rateLimit            = require('express-rate-limit');
+const smmProviderRoutes    = require('./routes/smmProviderRoutes');
+const boostingRoutes       = require('./routes/boostingRoutes');
+const { startAutoRefundJob } = require('./services/autoRefundJob');
 
-
-
-
+// Connect DB and start background jobs
 connectDB();
 startOrderCron();
+startAutoRefundJob();
 
 const app = express();
 
