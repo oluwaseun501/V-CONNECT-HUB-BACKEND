@@ -55,11 +55,24 @@ const purchaseNumber = async (country, operator, product) => {
     method: 'GET',
     headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' }
   });
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`Provider error (${res.status}): ${err || 'no details'}`);
+  const text = await res.text();
+  if (text === 'no free phones' || text.includes('no free phones')) {
+    throw new Error('No numbers available for this selection. Please try a different country or service.');
   }
-  return res.json();
+  if (text === 'not enough product' || text.includes('not enough')) {
+    throw new Error('This number type is out of stock. Please try another.');
+  }
+  if (text === 'no money' || text.includes('no money')) {
+    throw new Error('Insufficient balance on the provider. Please contact support.');
+  }
+  if (!res.ok) {
+    throw new Error(`Provider error (${res.status}): ${text || 'no details'}`);
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`Unexpected response from provider: ${text}`);
+  }
 };
 
 const checkOrder = async (orderId) => {
