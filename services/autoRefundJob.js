@@ -28,10 +28,13 @@ const JOB_INTERVAL   =  5 * 60 * 1000; // run every 5 minutes
 async function processExpiredOrders() {
   const cutoff = new Date(Date.now() - EXPIRY_MS);
 
-  // Find all PENDING orders whose createdAt is older than the cutoff
+  // Find PENDING or RECEIVED orders older than the cutoff with no SMS received.
+  // RECEIVED with no SMS means 5sim changed the status on their side but no code
+  // was actually delivered — these need to be refunded too.
   const expiredOrders = await VirtualOrder.find({
-    status:    'PENDING',
+    status:    { $in: ['PENDING', 'RECEIVED'] },
     createdAt: { $lt: cutoff },
+    'sms.0':   { $exists: false },   // no SMS entries stored
   }).lean();
 
   if (!expiredOrders.length) return;

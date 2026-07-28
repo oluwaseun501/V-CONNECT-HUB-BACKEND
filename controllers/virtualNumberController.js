@@ -31,7 +31,6 @@ const listProducts = async (req, res) => {
         const siteConfig = await SiteConfig.findOne();
         const usdToNgn   = siteConfig?.usdToNgn ?? 1600;
 
-        // Load all overrides for this country
         const overrides = await PriceOverride.find({ country: country.toLowerCase() });
         const overrideMap = {};
         overrides.forEach(o => { overrideMap[o.service] = o.price; });
@@ -45,7 +44,6 @@ const listProducts = async (req, res) => {
             for (const [op, data] of Object.entries(operators)) {
                 const rawPrice = data?.Price ?? data?.price ?? data?.cost ?? 0;
 
-                // Use override if set, otherwise apply usdToNgn + markup
                 const finalPrice = overrideMap[service.toLowerCase()] != null
                     ? overrideMap[service.toLowerCase()]
                     : parseFloat((rawPrice * usdToNgn * (1 + markupPercent / 100)).toFixed(2));
@@ -73,10 +71,14 @@ const buyNumber = async (req, res) => {
         const siteConfig = await SiteConfig.findOne();
         const usdToNgn   = siteConfig?.usdToNgn ?? 1600;
 
+        // Reserve the number from 5sim
         const orderData = await purchaseNumber(country, operator, product);
         const basePrice = orderData.price ?? orderData.Price ?? 0;
 
-        // Check for a price override first
+        // What this number actually costs us in NGN (no markup)
+        const providerCostNgn = parseFloat((basePrice * usdToNgn).toFixed(2));
+
+        // Check for a price override
         const override = await PriceOverride.findOne({
             service: product.toLowerCase(),
             country: country.toLowerCase()
@@ -85,6 +87,25 @@ const buyNumber = async (req, res) => {
         const finalPrice = override
             ? override.price
             : parseFloat((basePrice * usdToNgn * (1 + markupPercent / 100)).toFixed(2));
+
+        // ── GUARD: enforce minimum margin ────────────────────────────────────
+        // The minimum acceptable price = provider cost + your full markup %.
+        // This blocks both loss-making purchases AND price overrides that
+        // undercut your configured profit margin.
+        const minimumPrice = parseFloat((providerCostNgn * (1 + markupPercent / 100)).toFixed(2));
+
+        if (finalPrice < minimumPrice) {
+            try { await cancelOrder(orderData.id); } catch (_) {}
+            console.warn(
+                `[buyNumber] GUARD blocked: finalPrice ₦${finalPrice} < ` +
+                `minimumPrice ₦${minimumPrice} (providerCost ₦${providerCostNgn} + ${markupPercent}% markup) ` +
+                `[${product}/${country}]`
+            );
+            return res.status(400).json({
+                message: 'This service is temporarily unavailable. Please contact support.'
+            });
+        }
+        // ─────────────────────────────────────────────────────────────────────
 
         await debitWallet(req.user._id, finalPrice, `Virtual number — ${product} (${country})`);
 
