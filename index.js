@@ -27,6 +27,15 @@ const app = express();
 
 app.use(cors({ origin: '*' }));
 app.use(helmet());
+
+// Higher limit for SMS polling — frontend checks every 10s per active order
+app.use('/api/numbers/check', rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 500,
+    message: { message: 'Too many requests, please try again later' }
+}));
+
+// Global rate limiter
 app.use(rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 100,
