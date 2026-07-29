@@ -668,7 +668,7 @@ const checkSms = async (
     }
 
     // --------------------------------------------------------
-    // IF ALREADY EXPIRED
+    // IF ALREADY IN A TERMINAL STATE
     // --------------------------------------------------------
     if (
       order.status ===
@@ -692,6 +692,9 @@ const checkSms = async (
 
         sms:
           order.sms,
+
+        expiresAt:
+          order.expiresAt,
       });
     }
 
@@ -712,14 +715,27 @@ const checkSms = async (
     }
 
     // --------------------------------------------------------
-    // UPDATE SMS
+    // FIX: update SMS and mark modified so Mongoose
+    // always writes the change to the database.
+    // Without markModified, Mongoose can silently skip
+    // saving a reassigned subdocument array.
     // --------------------------------------------------------
     if (
       Array.isArray(result.sms) &&
       result.sms.length > 0
     ) {
-      order.sms =
-        result.sms;
+      // Map only the fields the schema knows about so
+      // Mongoose doesn't receive unknown keys that could
+      // confuse strict-mode casting
+      order.sms = result.sms.map((s) => ({
+        sender: s.sender || '',
+        text:   s.text   || '',
+        code:   s.code   || '',
+        date:   s.date   ? new Date(s.date * 1000) : new Date(),
+      }));
+
+      // Force Mongoose to detect the array change
+      order.markModified('sms');
     }
 
     // --------------------------------------------------------
@@ -758,6 +774,11 @@ const checkSms = async (
 
       sms:
         order.sms,
+
+      // Include expiresAt so the frontend
+      // can always display the correct timer
+      expiresAt:
+        order.expiresAt,
     });
 
   } catch (error) {
@@ -833,8 +854,13 @@ const cancelNumberOrder = async (
       ) &&
       liveOrder.sms.length > 0
     ) {
-      order.sms =
-        liveOrder.sms;
+      order.sms = liveOrder.sms.map((s) => ({
+        sender: s.sender || '',
+        text:   s.text   || '',
+        code:   s.code   || '',
+        date:   s.date   ? new Date(s.date * 1000) : new Date(),
+      }));
+      order.markModified('sms');
     }
 
     // Provider already received SMS
