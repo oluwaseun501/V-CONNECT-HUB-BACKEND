@@ -762,6 +762,39 @@ const checkSms = async (
 
     await order.save();
 
+    // --------------------------------------------------------
+    // AUTO-REFUND: issue immediately when the order ends
+    // with no SMS — whether 5sim cancelled early OR our own
+    // 15-min timeout fired.  Covers the gap where the job
+    // only scans PENDING orders older than 15 min but misses
+    // orders that 5sim terminates before that window is up.
+    // --------------------------------------------------------
+    const isTerminal =
+      order.status === 'TIMEOUT'   ||
+      order.status === 'CANCELED'  ||
+      order.status === 'FINISHED'  ||
+      order.status === 'BANNED';
+
+    if (isTerminal && order.sms.length === 0) {
+      try {
+        await creditWallet(
+          order.user,
+          order.price,
+          `Auto-refund — expired number (${order.product}, ${order.country})`
+        );
+        console.log(
+          `[checkSms] Auto-refunded ₦${order.price} to user ${order.user}` +
+          ` for order ${order.orderId} [${order.status}]`
+        );
+      } catch (refundErr) {
+        // Log but don't fail the response — DB is already updated
+        console.error(
+          `[checkSms] Refund failed for order ${order.orderId}:`,
+          refundErr.message
+        );
+      }
+    }
+
     return res.status(200).json({
       orderId:
         order.orderId,
