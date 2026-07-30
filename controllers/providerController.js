@@ -48,13 +48,22 @@ const updateProvider = async (req, res) => {
     }
 };
 
+// UPDATED: toggle the clicked provider on/off independently
+// so multiple providers can be active at the same time.
+// Previously this deactivated ALL providers before activating one.
 const setActiveProvider = async (req, res) => {
     try {
-        // Deactivate all, then activate the selected one
-        await Provider.updateMany({}, { isActive: false });
-        const provider = await Provider.findByIdAndUpdate(req.params.id, { isActive: true }, { new: true });
+        const provider = await Provider.findById(req.params.id);
         if (!provider) return res.status(404).json({ message: 'Provider not found' });
-        res.status(200).json({ message: `${provider.name} is now the active provider` });
+
+        // Toggle: active → disabled, inactive → enabled
+        provider.isActive = !provider.isActive;
+        await provider.save();
+
+        res.status(200).json({
+            message: `Provider ${provider.isActive ? 'enabled' : 'disabled'} successfully`,
+            provider: { ...provider.toObject(), apiKey: '••••••' + provider.apiKey.slice(-6) },
+        });
     } catch (error) {
         res.status(500).json({ message: error.message });
     }
