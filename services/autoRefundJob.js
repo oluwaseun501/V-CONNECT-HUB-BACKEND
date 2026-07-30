@@ -1,121 +1,136 @@
 /**
- * autoRefundJob.js
- * ─────────────────────────────────────────────────────────────
- * Runs every 5 minutes.
- * Finds PENDING virtual-number orders older than 15 minutes,
- * checks their real status from 5sim, and:
- *   • If 5sim already received/finished → update DB, no refund.
- *   • Otherwise → cancel with 5sim, mark CANCELED/TIMEOUT, and
- *     credit the user's wallet with the full order price.
- * ─────────────────────────────────────────────────────────────
- * Usage (in your server.js / app.js):
+ * services/autoRefundJob.js
  *
- *   const { startAutoRefundJob } = require('./services/autoRefundJob');
- *   startAutoRefundJob();
+ * Runs every 1 minute (was 5).
+ * Finds PENDING/RECEIVED virtual-number orders older than 15 minutes
+ * with no SMS, checks real status from 5sim, then:
+ *   • RECEIVED / FINISHED on 5sim → update DB only, no refund.
+ *   • Still PENDING on 5sim      → cancel with 5sim + refund wallet.
+ *   • 5sim check fails           → treat as TIMEOUT + refund wallet.
+ *
+ * Changes from previous version:
+ *   1. Interval reduced from 5 min → 1 min (refund within ~1 min of expiry)
+ *   2. isRunning guard added — prevents two scans overlapping under load
  */
 
-const VirtualOrder  = require('../models/VirtualOrder');
+const VirtualOrder             = require('../models/VirtualOrder');
 const { creditWallet }         = require('./walletService');
 const { checkOrder, cancelOrder } = require('./fivesimService');
 
-const EXPIRY_MS      = 15 * 60 * 1000; // 15 minutes — same window as 5sim
-const JOB_INTERVAL   =  5 * 60 * 1000; // run every 5 minutes
+const EXPIRY_MS    = 15 * 60 * 1000; // 15-minute activation window
+const JOB_INTERVAL =  1 * 60 * 1000; // scan every 1 minute
+
+// Prevents two runs overlapping if DB / 5sim is slow
+let isRunning = false;
 
 /**
  * Process one batch of expired PENDING orders.
  * Safe to call manually (e.g. from a test or admin route).
  */
 async function processExpiredOrders() {
-  const cutoff = new Date(Date.now() - EXPIRY_MS);
+  if (isRunning) return;
+  isRunning = true;
 
-  // Find PENDING or RECEIVED orders older than the cutoff with no SMS received.
-  // RECEIVED with no SMS means 5sim changed the status on their side but no code
-  // was actually delivered — these need to be refunded too.
-  const expiredOrders = await VirtualOrder.find({
-    status:    { $in: ['PENDING', 'RECEIVED'] },
-    createdAt: { $lt: cutoff },
-    'sms.0':   { $exists: false },   // no SMS entries stored
-  }).lean();
+  try {
+    const cutoff = new Date(Date.now() - EXPIRY_MS);
 
-  if (!expiredOrders.length) return;
+    // PENDING or RECEIVED orders older than 15 min with no SMS stored
+    const expiredOrders = await VirtualOrder.find({
+      status:    { $in: ['PENDING', 'RECEIVED'] },
+      createdAt: { $lt: cutoff },
+      'sms.0':   { $exists: false },
+    }).lean();
 
-  console.log(`[autoRefund] Found ${expiredOrders.length} expired PENDING order(s) to process`);
+    if (!expiredOrders.length) return;
 
-  for (const order of expiredOrders) {
-    try {
-      // ── 1. Get the real status from 5sim ──────────────────────
-      let liveStatus = null;
-      let liveSms    = [];
+    console.log(`[autoRefund] Found ${expiredOrders.length} expired order(s) to process`);
 
+    for (const order of expiredOrders) {
       try {
-        const live = await checkOrder(order.orderId);
-        liveStatus = live.status?.toUpperCase() || null;
-        liveSms    = live.sms || [];
-      } catch (checkErr) {
-        // 5sim check failed — treat as timed-out so we still refund
-        console.warn(`[autoRefund] Could not check order ${order.orderId}: ${checkErr.message}`);
-      }
+        // ── 1. Get real status from 5sim ─────────────────────────────
+        let liveStatus = null;
+        let liveSms    = [];
 
-      // ── 2. If OTP was actually received, just update — no refund ─
-      if (liveStatus === 'RECEIVED' || liveStatus === 'FINISHED') {
+        try {
+          const live = await checkOrder(order.orderId);
+          liveStatus = live.status?.toUpperCase() || null;
+          liveSms    = live.sms || [];
+        } catch (checkErr) {
+          // 5sim check failed — treat as timed-out, still refund
+          console.warn(
+            `[autoRefund] Could not check order ${order.orderId}: ${checkErr.message}`
+          );
+        }
+
+        // ── 2. OTP actually arrived on 5sim — update only, no refund ─
+        if (liveStatus === 'RECEIVED' || liveStatus === 'FINISHED') {
+          await VirtualOrder.updateOne(
+            { _id: order._id },
+            { status: liveStatus, ...(liveSms.length ? { sms: liveSms } : {}) }
+          );
+          console.log(
+            `[autoRefund] Order ${order.orderId} already ${liveStatus} — skipping refund`
+          );
+          continue;
+        }
+
+        // ── 3. Cancel with 5sim (best-effort) ────────────────────────
+        let finalStatus = liveStatus || 'TIMEOUT';
+
+        if (!liveStatus || liveStatus === 'PENDING') {
+          try {
+            await cancelOrder(order.orderId);
+            finalStatus = 'CANCELED';
+          } catch {
+            // 5sim may reject if already expired on their side — fine
+            finalStatus = 'TIMEOUT';
+          }
+        }
+
+        // ── 4. Update DB ──────────────────────────────────────────────
         await VirtualOrder.updateOne(
           { _id: order._id },
-          { status: liveStatus, ...(liveSms.length ? { sms: liveSms } : {}) }
+          {
+            status: finalStatus,
+            ...(liveSms.length ? { sms: liveSms } : {}),
+          }
         );
-        console.log(`[autoRefund] Order ${order.orderId} already ${liveStatus} — skipping refund`);
-        continue;
+
+        // ── 5. Refund the user's wallet ───────────────────────────────
+        await creditWallet(
+          order.user,
+          order.price,
+          `Auto-refund — expired number (${order.product}, ${order.country})`
+        );
+
+        console.log(
+          `[autoRefund] Refunded ₦${order.price} to user ${order.user} ` +
+          `for order ${order.orderId} [${finalStatus}]`
+        );
+      } catch (err) {
+        // Never let one order crash the whole job
+        console.error(
+          `[autoRefund] Error processing order ${order.orderId}:`, err.message
+        );
       }
-
-      // ── 3. Try to cancel with 5sim (best-effort) ─────────────────
-      let finalStatus = liveStatus || 'TIMEOUT';
-
-      if (!liveStatus || liveStatus === 'PENDING') {
-        try {
-          await cancelOrder(order.orderId);
-          finalStatus = 'CANCELED';
-        } catch {
-          // 5sim may reject cancel if already expired on their side — that's fine
-          finalStatus = 'TIMEOUT';
-        }
-      }
-
-      // ── 4. Update DB ──────────────────────────────────────────────
-      await VirtualOrder.updateOne(
-        { _id: order._id },
-        {
-          status: finalStatus,
-          ...(liveSms.length ? { sms: liveSms } : {}),
-        }
-      );
-
-      // ── 5. Refund the user's wallet ───────────────────────────────
-      await creditWallet(
-        order.user,
-        order.price,
-        `Auto-refund — expired number (${order.product}, ${order.country})`
-      );
-
-      console.log(
-        `[autoRefund] Refunded ₦${order.price} to user ${order.user} ` +
-        `for order ${order.orderId} [${finalStatus}]`
-      );
-    } catch (err) {
-      // Never let one order crash the whole job
-      console.error(`[autoRefund] Error processing order ${order.orderId}:`, err.message);
     }
+  } catch (err) {
+    console.error('[autoRefund] Scan error:', err.message);
+  } finally {
+    isRunning = false;
   }
 }
 
 /**
  * Start the background job.
- * Call once at server startup — it runs immediately then every JOB_INTERVAL ms.
+ * Call once at server startup — runs immediately then every JOB_INTERVAL ms.
  * Returns the interval ID so you can clearInterval(id) in tests.
  */
 function startAutoRefundJob() {
-  console.log('[autoRefund] Auto-refund job started (interval: 5 min)');
+  console.log('[autoRefund] Auto-refund job started (interval: 1 min)');
 
-  // Run once right away so numbers that were already expired before restart
-  // get refunded immediately without waiting 5 minutes.
+  // Run once immediately so orders that expired during downtime/restart
+  // get refunded right away without waiting a full minute.
   processExpiredOrders().catch((err) =>
     console.error('[autoRefund] Initial run error:', err.message)
   );
