@@ -35,6 +35,32 @@ const ORDER_EXPIRY_MS =
 
 
 // ============================================================
+// NORMALIZE 5SIM STATUS → OUR ENUM
+// ============================================================
+// 5sim returns STATUS_OK, STATUS_CANCEL, STATUS_WAIT_CODE, etc.
+// Our Mongoose schema expects PENDING, RECEIVED, CANCELED, TIMEOUT.
+// Without this mapping, order.save() throws a ValidationError and
+// the SMS is never written to the database — causing the "code only
+// appears after timeout" bug.
+// ============================================================
+function normalize5simStatus(raw) {
+  if (!raw) return null;
+  const s = raw.toUpperCase();
+  const map = {
+    'STATUS_WAIT_CODE':   'PENDING',
+    'STATUS_WAIT_RETRY':  'PENDING',
+    'STATUS_WAIT_RESEND': 'PENDING',
+    'STATUS_OK':          'RECEIVED',
+    'STATUS_CANCEL':      'CANCELED',
+    'STATUS_TIMEOUT':     'TIMEOUT',
+  };
+  // If 5sim already sends a value we recognise (e.g. "RECEIVED"),
+  // the map lookup returns undefined and we fall back to s.
+  return map[s] ?? s;
+}
+
+
+// ============================================================
 // GET AVAILABLE COUNTRIES
 // ============================================================
 const listCountries = async (
@@ -551,9 +577,7 @@ const buyNumber = async (
             finalPrice,
 
           status:
-            orderData.status
-              ?.toUpperCase() ||
-            'PENDING',
+            normalize5simStatus(orderData.status) || 'PENDING',
 
           expiresAt,
 
@@ -588,11 +612,11 @@ const buyNumber = async (
       // Refund wallet
       if (walletDebited) {
         try {
-await creditWallet(
-    req.user._id,
-    finalPrice,
-    `Refund — failed virtual number order (${product})`
-);
+          await creditWallet(
+            req.user._id,
+            finalPrice,
+            `Refund — failed virtual number order (${product})`
+          );
           console.log(
             `[buyNumber] User refunded ₦${finalPrice}`
           );
@@ -710,20 +734,21 @@ const checkSms = async (
       await checkOrder(
         Number(orderId)
       );
-      
 
     // --------------------------------------------------------
-    // UPDATE STATUS
+    // NORMALIZE + UPDATE STATUS
+    // FIX: 5sim returns STATUS_OK, STATUS_CANCEL, etc.
+    // Map these to our enum values before saving, otherwise
+    // Mongoose throws a ValidationError and the SMS is lost.
     // --------------------------------------------------------
     if (result.status) {
-      order.status =
-        result.status.toUpperCase();
+      order.status = normalize5simStatus(result.status);
     }
 
     order.providerStatus =
-    result.status?.toUpperCase() || order.providerStatus;
+      result.status?.toUpperCase() || order.providerStatus;
 
-order.lastCheckedAt = new Date();
+    order.lastCheckedAt = new Date();
 
     // --------------------------------------------------------
     // FIX: update SMS and mark modified so Mongoose
@@ -731,12 +756,10 @@ order.lastCheckedAt = new Date();
     // Without markModified, Mongoose can silently skip
     // saving a reassigned subdocument array.
     // --------------------------------------------------------
-   if (Array.isArray(result.sms) && result.sms.length > 0) {
-
-    order.sms = mapSms(result.sms);
-
-    order.markModified("sms");
-}
+    if (Array.isArray(result.sms) && result.sms.length > 0) {
+      order.sms = mapSms(result.sms);
+      order.markModified('sms');
+    }
 
     // --------------------------------------------------------
     // OUR 15-MINUTE EXPIRY FALLBACK
@@ -765,26 +788,24 @@ order.lastCheckedAt = new Date();
     // --------------------------------------------------------
     // AUTO-REFUND: issue immediately when the order ends
     // with no SMS — whether 5sim cancelled early OR our own
-    // 15-min timeout fired.  Covers the gap where the job
-    // only scans PENDING orders older than 15 min but misses
-    // orders that 5sim terminates before that window is up.
+    // 15-min timeout fired.
     // --------------------------------------------------------
     const terminalStates = [
-    "TIMEOUT",
-    "CANCELED",
-    "BANNED"
-];
+      'TIMEOUT',
+      'CANCELED',
+      'BANNED',
+    ];
 
-if (
-    terminalStates.includes(order.status) &&
-    order.sms.length === 0
-) {
-
-    await refundOrder(
+    if (
+      terminalStates.includes(order.status) &&
+      order.sms.length === 0
+    ) {
+      await refundOrder(
         order,
         `Auto-refund — expired number (${order.product}, ${order.country})`
-    );
-}
+      );
+    }
+
     return res.status(200).json({
       orderId:
         order.orderId,
@@ -862,19 +883,19 @@ const cancelNumberOrder = async (
         Number(orderId)
       );
 
+    // FIX: normalize 5sim status before assigning
     const liveStatus =
-      liveOrder.status
-        ?.toUpperCase();
+      normalize5simStatus(liveOrder.status);
 
     if (liveStatus) {
-      order.status =
-        liveStatus;
+      order.status = liveStatus;
     }
 
-if (Array.isArray(liveOrder.sms) && liveOrder.sms.length > 0) {
-    order.sms = mapSms(liveOrder.sms);
-    order.markModified("sms");
-}
+    if (Array.isArray(liveOrder.sms) && liveOrder.sms.length > 0) {
+      order.sms = mapSms(liveOrder.sms);
+      order.markModified('sms');
+    }
+
     // Provider already received SMS
     if (
       order.status ===
@@ -914,9 +935,10 @@ if (Array.isArray(liveOrder.sms) && liveOrder.sms.length > 0) {
 
     // Refund customer
     await refundOrder(
-    order,
-    `Refund — cancelled number (${order.product})`
-);
+      order,
+      `Refund — cancelled number (${order.product})`
+    );
+
     return res.status(200).json({
       message:
         'Order cancelled and refunded',
@@ -968,22 +990,22 @@ const finishNumberOrder = async (
     }
 
     if (
-    order.status === "FINISHED"
-) {
-    return res.status(400).json({
-        message: "Order already finished"
-    });
-}
+      order.status === 'FINISHED'
+    ) {
+      return res.status(400).json({
+        message: 'Order already finished',
+      });
+    }
 
-if (
-    order.status === "CANCELED" ||
-    order.status === "TIMEOUT" ||
-    order.status === "BANNED"
-) {
-    return res.status(400).json({
-        message: "Cannot finish an expired order"
-    });
-}
+    if (
+      order.status === 'CANCELED' ||
+      order.status === 'TIMEOUT' ||
+      order.status === 'BANNED'
+    ) {
+      return res.status(400).json({
+        message: 'Cannot finish an expired order',
+      });
+    }
 
     await finishOrder(
       Number(orderId)

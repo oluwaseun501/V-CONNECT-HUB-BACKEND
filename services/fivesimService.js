@@ -140,14 +140,19 @@ const checkOrder = async (orderId) => {
     },
   });
 
+  const text = await res.text();   // ← read as text first
+
   if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Failed to check order (${res.status}): ${body}`);
+    throw new Error(`Failed to check order (${res.status}): ${text}`);
   }
 
-  return res.json();
+  try {
+    return JSON.parse(text);       // ← then parse
+  } catch {
+    console.warn(`[checkOrder] Non-JSON response for order ${orderId}:`, text);
+    throw new Error(`Unexpected response from provider: ${text}`);
+  }
 };
-
 
 // ============================================================
 // CANCEL ORDER
