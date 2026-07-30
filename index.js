@@ -20,9 +20,13 @@ const { startAutoRefundJob } = require('./services/autoRefundJob');
 
 
 // Connect DB and start background jobs
-connectDB();
-startOrderCron();
-startAutoRefundJob();
+connectDB().then(() => {
+    startOrderCron();
+    startAutoRefundJob();
+}).catch((err) => {
+    console.error('DB connection failed:', err.message);
+    process.exit(1);
+});
 
 const app = express();
 
@@ -32,7 +36,7 @@ app.use(helmet());
 // Higher limit for SMS polling — frontend checks every 10s per active order
 app.use('/api/numbers/check', rateLimit({
     windowMs: 15 * 60 * 1000,
-    max: 500,
+    max: 1000,
     message: { message: 'Too many requests, please try again later' }
 }));
 

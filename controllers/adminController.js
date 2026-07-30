@@ -2,6 +2,7 @@ const User = require('../models/User');
 const Transaction = require('../models/Transaction');
 const VirtualOrder = require('../models/VirtualOrder');
 const { creditWallet, debitWallet } = require('../services/walletService');
+const { finishOrder } = require('../services/fivesimService');
 const SiteConfig = require('../models/SiteConfig');
 
 const getDashboardStats = async (req, res) => {
@@ -14,11 +15,10 @@ const getDashboardStats = async (req, res) => {
             User.find().sort({ createdAt: -1 }).limit(5).select('-password -transactionPin')
         ]);
 
-       const revenueAgg = await Transaction.aggregate([
-    { $match: { type: 'debit', status: 'successful' } },
-    { $group: { _id: null, total: { $sum: '$amount' } } }
-]);
-      
+        const revenueAgg = await Transaction.aggregate([
+            { $match: { type: 'debit', status: 'successful' } },
+            { $group: { _id: null, total: { $sum: '$amount' } } }
+        ]);
         const totalRevenue = revenueAgg[0]?.total ?? 0;
 
         const fundedAgg = await Transaction.aggregate([
@@ -75,12 +75,14 @@ const getUserById = async (req, res) => {
     }
 };
 
+// ── FIX #1: now also handles isBanned ────────────────────────────────────
 const updateUser = async (req, res) => {
     try {
-        const { isAdmin, isEmailVerified } = req.body;
+        const { isAdmin, isEmailVerified, isBanned } = req.body;
         const update = {};
-        if (isAdmin !== undefined) update.isAdmin = isAdmin;
+        if (isAdmin         !== undefined) update.isAdmin         = isAdmin;
         if (isEmailVerified !== undefined) update.isEmailVerified = isEmailVerified;
+        if (isBanned        !== undefined) update.isBanned        = isBanned;
 
         const user = await User.findByIdAndUpdate(req.params.id, update, { new: true })
             .select('-password -transactionPin');
@@ -115,12 +117,14 @@ const fundUserWallet = async (req, res) => {
     }
 };
 
+// ── FIX #2: reads `reason` from frontend as fallback for `description` ───
 const debitUserWallet = async (req, res) => {
     try {
-        const { amount, description } = req.body;
+        const { amount, description, reason } = req.body;
         if (!amount || Number(amount) <= 0) return res.status(400).json({ message: 'Valid amount required' });
 
-        await debitWallet(req.params.id, Number(amount), description || 'Admin wallet debit');
+        const note = description || reason || 'Admin wallet debit';
+        await debitWallet(req.params.id, Number(amount), note);
         const user = await User.findById(req.params.id).select('name email balance');
         res.status(200).json({ message: 'Wallet debited', user });
     } catch (error) {
@@ -136,17 +140,17 @@ const getAllTransactions = async (req, res) => {
 
         const filter = {};
         if (req.query.type) {
-    if (req.query.type === 'admin') {
-        filter.description = { $regex: 'Admin wallet', $options: 'i' };
-    } else if (req.query.type === 'transfer') {
-        filter.$or = [
-            { type: 'transfer' },
-            { description: { $regex: 'Transfer to|Transfer from', $options: 'i' } }
-        ];
-    } else {
-        filter.type = req.query.type;
-    }
-}
+            if (req.query.type === 'admin') {
+                filter.description = { $regex: 'Admin wallet', $options: 'i' };
+            } else if (req.query.type === 'transfer') {
+                filter.$or = [
+                    { type: 'transfer' },
+                    { description: { $regex: 'Transfer to|Transfer from', $options: 'i' } }
+                ];
+            } else {
+                filter.type = req.query.type;
+            }
+        }
         if (req.query.status) filter.status = req.query.status;
         if (req.query.from || req.query.to) {
             filter.createdAt = {};
@@ -154,7 +158,6 @@ const getAllTransactions = async (req, res) => {
             if (req.query.to)   filter.createdAt.$lte = new Date(req.query.to);
         }
 
-        // Summary uses only date filter (so cards always show full breakdown)
         const summaryFilter = {};
         if (filter.createdAt) summaryFilter.createdAt = filter.createdAt;
 
@@ -225,9 +228,9 @@ const updateSettings = async (req, res) => {
         const { maintenanceMode, maintenanceMessage, usdToNgn } = req.body;
         let config = await SiteConfig.findOne();
         if (!config) config = new SiteConfig({});
-        if (maintenanceMode  !== undefined) config.maintenanceMode    = maintenanceMode;
+        if (maintenanceMode    !== undefined) config.maintenanceMode    = maintenanceMode;
         if (maintenanceMessage !== undefined) config.maintenanceMessage = maintenanceMessage;
-        if (usdToNgn         !== undefined) config.usdToNgn           = usdToNgn;
+        if (usdToNgn           !== undefined) config.usdToNgn           = usdToNgn;
         await config.save();
         res.status(200).json(config);
     } catch (error) {
@@ -235,8 +238,136 @@ const updateSettings = async (req, res) => {
     }
 };
 
+// ============================================================
+// APPROVE PENDING TRANSACTION
+// FIX #3: only credits wallet for credit/fund type transactions
+// ============================================================
+const approveTransaction = async (req, res) => {
+    try {
+        const transaction = await Transaction.findById(req.params.id);
+
+        if (!transaction) {
+            return res.status(404).json({ message: 'Transaction not found' });
+        }
+
+        if (transaction.status !== 'pending') {
+            return res.status(400).json({ message: 'Transaction has already been processed' });
+        }
+
+        // Only adjust balance for credit-type transactions (funding requests).
+        // Debit-type pending transactions do not credit the wallet on approval.
+        if (transaction.type === 'credit' || transaction.type === 'fund') {
+            const user = await User.findByIdAndUpdate(
+                transaction.user,
+                { $inc: { balance: transaction.amount } },
+                { new: true }
+            );
+
+            if (!user) {
+                return res.status(404).json({ message: 'User not found' });
+            }
+        }
+
+        transaction.status = 'successful';
+        await transaction.save();
+
+        return res.status(200).json({
+            message: 'Transaction approved successfully',
+            transaction
+        });
+
+    } catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+};
+
+// ============================================================
+// REJECT PENDING TRANSACTION
+// ============================================================
+const rejectTransaction = async (req, res) => {
+    try {
+        const transaction = await Transaction.findById(req.params.id);
+
+        if (!transaction) {
+            return res.status(404).json({ message: 'Transaction not found' });
+        }
+
+        if (transaction.status !== 'pending') {
+            return res.status(400).json({ message: 'Transaction has already been processed' });
+        }
+
+        transaction.status = 'failed';
+        await transaction.save();
+
+        return res.status(200).json({
+            message: 'Transaction rejected successfully',
+            transaction
+        });
+
+    } catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+};
+
+// ============================================================
+// MARK ORDER AS COMPLETED
+// Route: PUT /api/admin/orders/:id/complete
+// FIX: also calls finishOrder() on 5sim so the number is
+// released on the provider side (best-effort, won't block save).
+// ============================================================
+const markOrderComplete = async (req, res) => {
+    try {
+        const order = await VirtualOrder.findById(req.params.id);
+
+        if (!order) {
+            return res.status(404).json({ message: 'Order not found' });
+        }
+
+        if (order.status === 'FINISHED') {
+            return res.status(400).json({ message: 'Order is already completed' });
+        }
+
+        if (['CANCELED', 'TIMEOUT', 'BANNED'].includes(order.status)) {
+            return res.status(400).json({ message: `Cannot complete an order with status: ${order.status}` });
+        }
+
+        // Tell 5sim the order is finished so the number is released.
+        // Best-effort — if provider rejects (e.g. already expired on their side),
+        // we still mark it complete locally.
+        try {
+            await finishOrder(order.orderId);
+        } catch (providerErr) {
+            console.warn(
+                `[markOrderComplete] Could not finish order ${order.orderId} on provider: ${providerErr.message}`
+            );
+        }
+
+        order.status = 'FINISHED';
+        await order.save();
+
+        return res.status(200).json({
+            message: 'Order marked as completed',
+            order
+        });
+
+    } catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+};
+
 module.exports = {
-    getDashboardStats, getAllUsers, getUserById, updateUser, deleteUser,
-    fundUserWallet, debitUserWallet, getAllTransactions, getAllOrders,
-    getSettings, updateSettings
+    getDashboardStats,
+    getAllUsers,
+    getUserById,
+    updateUser,
+    deleteUser,
+    fundUserWallet,
+    debitUserWallet,
+    approveTransaction,
+    rejectTransaction,
+    markOrderComplete,
+    getAllTransactions,
+    getAllOrders,
+    getSettings,
+    updateSettings,
 };

@@ -52,6 +52,12 @@ const virtualOrderSchema = new mongoose.Schema(
       default: 'PENDING',
     },
 
+   providerStatus: {
+    type: String,
+    default: "PENDING",
+},
+
+
     sms: [
       {
         sender: String,
@@ -61,16 +67,31 @@ const virtualOrderSchema = new mongoose.Schema(
       },
     ],
 
-    // Our platform's 15-minute activation window
     expiresAt: {
       type: Date,
       required: true,
+    },
+
+    lastCheckedAt: {
+      type: Date,
+      default: null,
+    },
+
+    refunded: {
+      type: Boolean,
+      default: false,
+    },
+
+    refundedAt: {
+      type: Date,
+      default: null,
     },
   },
   {
     timestamps: true,
   }
 );
+
 
 module.exports = mongoose.model(
   'VirtualOrder',

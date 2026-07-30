@@ -11,11 +11,12 @@
  * Changes from previous version:
  *   1. Interval reduced from 5 min → 1 min (refund within ~1 min of expiry)
  *   2. isRunning guard added — prevents two scans overlapping under load
+ *   3. Now uses refundService.refundOrder() for idempotency + audit trail
  */
 
-const VirtualOrder             = require('../models/VirtualOrder');
-const { creditWallet }         = require('./walletService');
-const { checkOrder, cancelOrder } = require('./fivesimService');
+const VirtualOrder                  = require('../models/VirtualOrder');
+const { refundOrder }               = require('./refundService');
+const { checkOrder, cancelOrder }   = require('./fivesimService');
 
 const EXPIRY_MS    = 15 * 60 * 1000; // 15-minute activation window
 const JOB_INTERVAL =  1 * 60 * 1000; // scan every 1 minute
@@ -87,7 +88,7 @@ async function processExpiredOrders() {
           }
         }
 
-        // ── 4. Update DB ──────────────────────────────────────────────
+        // ── 4. Update order status in DB ──────────────────────────────
         await VirtualOrder.updateOne(
           { _id: order._id },
           {
@@ -96,17 +97,27 @@ async function processExpiredOrders() {
           }
         );
 
-        // ── 5. Refund the user's wallet ───────────────────────────────
-        await creditWallet(
-          order.user,
-          order.price,
+        // ── 5. Refund via refundService (idempotent + sets audit flags) ─
+        // refundOrder uses a findOneAndUpdate { refunded: false } lock so
+        // it is safe to retry and will never double-credit the wallet.
+        const refunded = await refundOrder(
+          order,
           `Auto-refund — expired number (${order.product}, ${order.country})`
         );
 
-        console.log(
-          `[autoRefund] Refunded ₦${order.price} to user ${order.user} ` +
-          `for order ${order.orderId} [${finalStatus}]`
-        );
+        if (refunded) {
+          console.log(
+            `[autoRefund] Refunded ₦${order.price} to user ${order.user} ` +
+            `for order ${order.orderId} [${finalStatus}]`
+          );
+        } else {
+          // refunded: true was already set — this order was somehow
+          // processed before (e.g. manual admin refund). Log and move on.
+          console.warn(
+            `[autoRefund] Order ${order.orderId} already marked as refunded — skipping wallet credit`
+          );
+        }
+
       } catch (err) {
         // Never let one order crash the whole job
         console.error(

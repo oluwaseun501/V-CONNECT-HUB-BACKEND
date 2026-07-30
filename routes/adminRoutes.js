@@ -11,12 +11,14 @@ const {
     debitUserWallet,
     getAllTransactions,
     getAllOrders,
-    getSettings,       // ← add this
-    updateSettings     // ← add this
+    markOrderComplete,       // ← NEW
+    getSettings,
+    updateSettings,
+    approveTransaction,
+    rejectTransaction,
 } = require('../controllers/adminController');
 
 const { getAllProviders, addProvider, updateProvider, setActiveProvider, deleteProvider } = require('../controllers/providerController');
-
 
 const { getOverrides, upsertOverride, deleteOverride } = require('../controllers/priceOverrideController');
 
@@ -41,19 +43,23 @@ router.put('/users/:id', updateUser);
 router.delete('/users/:id', deleteUser);
 router.post('/users/:id/fund', fundUserWallet);
 router.post('/users/:id/debit', debitUserWallet);
+
 router.get('/transactions', getAllTransactions);
+router.put('/transactions/:id/approve', approveTransaction);
+router.put('/transactions/:id/reject', rejectTransaction);
+
 router.get('/orders', getAllOrders);
+router.put('/orders/:id/complete', markOrderComplete);   // ← NEW
 
-router.get('/providers',                 getAllProviders);
-router.post('/providers',                addProvider);
-router.put('/providers/:id',             updateProvider);
-router.patch('/providers/:id/activate',  setActiveProvider);
-router.delete('/providers/:id',          deleteProvider);
-
+router.get('/providers',                getAllProviders);
+router.post('/providers',               addProvider);
+router.put('/providers/:id',            updateProvider);
+router.patch('/providers/:id/activate', setActiveProvider);
+router.delete('/providers/:id',         deleteProvider);
 
 // Price overrides
-router.get('/price-overrides',        protect, admin, getOverrides);
-router.post('/price-overrides',       protect, admin, upsertOverride);
-router.delete('/price-overrides/:id', protect, admin, deleteOverride);
+router.get('/price-overrides',      getOverrides);
+router.post('/price-overrides',     upsertOverride);
+router.delete('/price-overrides/:id', deleteOverride);
 
 module.exports = router;

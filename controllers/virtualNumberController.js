@@ -5,9 +5,15 @@ const SiteConfig = require('../models/SiteConfig');
 const User = require('../models/User');
 
 const {
-  debitWallet,
-  creditWallet,
-} = require('../services/walletService');
+    debitWallet,
+    creditWallet,
+} = require("../services/walletService");
+
+const {
+  refundOrder,
+} = require('../services/refundService');
+
+const mapSms = require('../utils/smsMapper');
 
 const {
   getAvailableCountries,
@@ -582,12 +588,11 @@ const buyNumber = async (
       // Refund wallet
       if (walletDebited) {
         try {
-          await creditWallet(
-            req.user._id,
-            finalPrice,
-            `Refund — failed virtual number order (${product})`
-          );
-
+await creditWallet(
+    req.user._id,
+    finalPrice,
+    `Refund — failed virtual number order (${product})`
+);
           console.log(
             `[buyNumber] User refunded ₦${finalPrice}`
           );
@@ -705,6 +710,7 @@ const checkSms = async (
       await checkOrder(
         Number(orderId)
       );
+      
 
     // --------------------------------------------------------
     // UPDATE STATUS
@@ -714,29 +720,23 @@ const checkSms = async (
         result.status.toUpperCase();
     }
 
+    order.providerStatus =
+    result.status?.toUpperCase() || order.providerStatus;
+
+order.lastCheckedAt = new Date();
+
     // --------------------------------------------------------
     // FIX: update SMS and mark modified so Mongoose
     // always writes the change to the database.
     // Without markModified, Mongoose can silently skip
     // saving a reassigned subdocument array.
     // --------------------------------------------------------
-    if (
-      Array.isArray(result.sms) &&
-      result.sms.length > 0
-    ) {
-      // Map only the fields the schema knows about so
-      // Mongoose doesn't receive unknown keys that could
-      // confuse strict-mode casting
-      order.sms = result.sms.map((s) => ({
-        sender: s.sender || '',
-        text:   s.text   || '',
-        code:   s.code   || '',
-        date:   s.date   ? new Date(s.date * 1000) : new Date(),
-      }));
+   if (Array.isArray(result.sms) && result.sms.length > 0) {
 
-      // Force Mongoose to detect the array change
-      order.markModified('sms');
-    }
+    order.sms = mapSms(result.sms);
+
+    order.markModified("sms");
+}
 
     // --------------------------------------------------------
     // OUR 15-MINUTE EXPIRY FALLBACK
@@ -769,32 +769,22 @@ const checkSms = async (
     // only scans PENDING orders older than 15 min but misses
     // orders that 5sim terminates before that window is up.
     // --------------------------------------------------------
-    const isTerminal =
-      order.status === 'TIMEOUT'   ||
-      order.status === 'CANCELED'  ||
-      order.status === 'FINISHED'  ||
-      order.status === 'BANNED';
+    const terminalStates = [
+    "TIMEOUT",
+    "CANCELED",
+    "BANNED"
+];
 
-    if (isTerminal && order.sms.length === 0) {
-      try {
-        await creditWallet(
-          order.user,
-          order.price,
-          `Auto-refund — expired number (${order.product}, ${order.country})`
-        );
-        console.log(
-          `[checkSms] Auto-refunded ₦${order.price} to user ${order.user}` +
-          ` for order ${order.orderId} [${order.status}]`
-        );
-      } catch (refundErr) {
-        // Log but don't fail the response — DB is already updated
-        console.error(
-          `[checkSms] Refund failed for order ${order.orderId}:`,
-          refundErr.message
-        );
-      }
-    }
+if (
+    terminalStates.includes(order.status) &&
+    order.sms.length === 0
+) {
 
+    await refundOrder(
+        order,
+        `Auto-refund — expired number (${order.product}, ${order.country})`
+    );
+}
     return res.status(200).json({
       orderId:
         order.orderId,
@@ -881,21 +871,10 @@ const cancelNumberOrder = async (
         liveStatus;
     }
 
-    if (
-      Array.isArray(
-        liveOrder.sms
-      ) &&
-      liveOrder.sms.length > 0
-    ) {
-      order.sms = liveOrder.sms.map((s) => ({
-        sender: s.sender || '',
-        text:   s.text   || '',
-        code:   s.code   || '',
-        date:   s.date   ? new Date(s.date * 1000) : new Date(),
-      }));
-      order.markModified('sms');
-    }
-
+if (Array.isArray(liveOrder.sms) && liveOrder.sms.length > 0) {
+    order.sms = mapSms(liveOrder.sms);
+    order.markModified("sms");
+}
     // Provider already received SMS
     if (
       order.status ===
@@ -934,12 +913,10 @@ const cancelNumberOrder = async (
     await order.save();
 
     // Refund customer
-    await creditWallet(
-      req.user._id,
-      order.price,
-      `Refund — cancelled number (${order.product})`
-    );
-
+    await refundOrder(
+    order,
+    `Refund — cancelled number (${order.product})`
+);
     return res.status(200).json({
       message:
         'Order cancelled and refunded',
@@ -989,6 +966,24 @@ const finishNumberOrder = async (
           'Order not found',
       });
     }
+
+    if (
+    order.status === "FINISHED"
+) {
+    return res.status(400).json({
+        message: "Order already finished"
+    });
+}
+
+if (
+    order.status === "CANCELED" ||
+    order.status === "TIMEOUT" ||
+    order.status === "BANNED"
+) {
+    return res.status(400).json({
+        message: "Cannot finish an expired order"
+    });
+}
 
     await finishOrder(
       Number(orderId)
