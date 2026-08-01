@@ -151,8 +151,6 @@ const updateSMMService = async (req, res) => {
         res.status(500).json({ message: error.message });
     }
 };
-
-// GET all services (with provider price + your price)
 const getSMMServices = async (req, res) => {
     try {
         const page     = parseInt(req.query.page)  || 1;
@@ -161,7 +159,11 @@ const getSMMServices = async (req, res) => {
         const category = req.query.category || '';
         const skip     = (page - 1) * limit;
 
+        // ← NEW: only show services from the currently active provider
+        const activeProvider = await SMMProvider.findOne({ isActive: true });
+
         const filter = {};
+        if (activeProvider) filter.provider = activeProvider._id;  // ← NEW
         if (search)   filter.name     = { $regex: search, $options: 'i' };
         if (category) filter.category = { $regex: category, $options: 'i' };
 
@@ -184,17 +186,18 @@ const getSMMServices = async (req, res) => {
         res.status(500).json({ message: error.message });
     }
 };
-
-// GET distinct categories (for filter dropdown)
 const getSMMCategories = async (req, res) => {
     try {
-        const categories = await SMMService.distinct('category');
+        // ← NEW: filter by active provider
+        const activeProvider = await SMMProvider.findOne({ isActive: true });
+        const filter = activeProvider ? { provider: activeProvider._id } : {};
+        
+        const categories = await SMMService.distinct('category', filter);
         res.status(200).json(categories.sort());
     } catch (error) {
         res.status(500).json({ message: error.message });
     }
 };
-
 
 module.exports = {
     getAllSMMProviders, addSMMProvider, updateSMMProvider,

@@ -185,15 +185,20 @@ const listProducts = async (req, res) => {
     const siteConfig = await SiteConfig.findOne();
     const usdToNgn = siteConfig?.usdToNgn ?? 1600;
 
-    const overrides = await PriceOverride.find({ country: country.toLowerCase() });
+const normalizedCountry = country.toLowerCase().trim();
 
-    const overrideMap = {};
-    overrides.forEach((override) => {
-      if (!override.provider || override.provider.toString() === provider._id.toString()) {
-        overrideMap[override.service.toLowerCase()] = override.price;
-      }
-    });
+const overrides = await PriceOverride.find({
+  provider: provider._id,
+  country: normalizedCountry,
+});
 
+const overrideMap = {};
+
+overrides.forEach((override) => {
+  overrideMap[override.service.toLowerCase().trim()] = Number(
+    override.price,
+  );
+});
     // ── NEW: build a set of disabled service names for this country+provider ──
     const blockedDocs = await ServiceBlock.find({
       country:  country.toLowerCase(),
@@ -219,27 +224,31 @@ const listProducts = async (req, res) => {
           data?.price ??
           data?.cost ??
           0;
+const overridePrice =
+  overrideMap[service.toLowerCase().trim()];
 
-        const overridePrice = overrideMap[service.toLowerCase()];
+const basePrice = parseFloat(
+  (
+    Number(rawPrice) *
+    Number(usdToNgn) *
+    (1 + Number(markupPercent) / 100)
+  ).toFixed(2)
+);
 
-        let finalPrice;
+const finalPrice =
+  overridePrice != null
+    ? Number(overridePrice)
+    : basePrice;
 
-        if (overridePrice != null) {
-          finalPrice = overridePrice;
-        } else {
-          finalPrice = parseFloat(
-            (
-              Number(rawPrice) *
-              Number(usdToNgn) *
-              (1 + Number(markupPercent) / 100)
-            ).toFixed(2)
-          );
-        }
+normalized[service][op] = {
+  ...data,
 
-        normalized[service][op] = {
-          ...data,
-          Price: finalPrice,
-        };
+  // Price before the admin override
+  BasePrice: basePrice,
+
+  // Price shown to users and used for purchase
+  Price: finalPrice,
+};
       }
     }
 
@@ -277,16 +286,21 @@ const buyNumber = async (req, res) => {
       ? await Provider.findById(preferredProviderId)
       : await Provider.findOne({ isActive: true });
 
+      if (!provider) {
+  return res.status(400).json({
+    message: "Selected provider was not found or is inactive",
+  });
+}
     const markupPercent = provider?.markupPercent ?? 0;
 
     const siteConfig = await SiteConfig.findOne();
     const usdToNgn = siteConfig?.usdToNgn ?? 1600;
 
-    const override = await PriceOverride.findOne({
-      service: product.toLowerCase(),
-      country: country.toLowerCase(),
-    });
-
+const override = await PriceOverride.findOne({
+  provider: provider._id,
+  service: product.toLowerCase().trim(),
+  country: country.toLowerCase().trim(),
+});
     const user = await User.findById(req.user._id).select('balance');
 
     if (!user) {
