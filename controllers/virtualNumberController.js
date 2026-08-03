@@ -267,17 +267,15 @@ normalized[service][op] = {
 // ============================================================
 // BUY VIRTUAL NUMBER
 // ============================================================
-const buyNumber = async (req, res) => {
+
+  
+ const buyNumber = async (req, res) => {
   let orderData = null;
   let walletDebited = false;
 
   try {
-    const {
-  country,
-  operator = 'virtual',
-} = req.params;
-
-const includeHidden = req.query.includeHidden === 'true';
+    const { product, preferredProviderId, country, operator = 'virtual' } = req.body;  
+    const includeHidden = req.query.includeHidden === 'true';
 
     if (!country || !product) {
       return res.status(400).json({
