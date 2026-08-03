@@ -1,5 +1,12 @@
 const dotenv = require('dotenv');
 dotenv.config();
+process.on('uncaughtException', (err) => {
+    console.error('[FATAL] Uncaught Exception:', err);
+});
+
+process.on('unhandledRejection', (reason) => {
+    console.error('[FATAL] Unhandled Rejection:', reason);
+});
 
 const express = require('express');
 const cors = require('cors');
@@ -40,10 +47,16 @@ app.use('/api/numbers/check', rateLimit({
     message: { message: 'Too many requests, please try again later' }
 }));
 
+app.use('/api/users/login', rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 20,
+    message: { message: 'Too many login attempts, please try again later' }
+}));
+
 // Global rate limiter
 app.use(rateLimit({
     windowMs: 15 * 60 * 1000,
-    max: 100,
+    max: 500,   
     message: { message: 'Too many requests, please try again later' }
 }));
 
