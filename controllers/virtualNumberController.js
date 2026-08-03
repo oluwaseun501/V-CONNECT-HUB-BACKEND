@@ -169,6 +169,8 @@ const listProducts = async (req, res) => {
       operator = 'virtual',
     } = req.params;
 
+    const includeHidden = req.query.includeHidden === 'true';
+
     let provider;
     if (req.query.provider) {
       provider = await Provider.findById(req.query.provider);
@@ -214,7 +216,7 @@ overrides.forEach((override) => {
       if (!operators || typeof operators !== 'object') continue;
 
       // ── NEW: skip services the admin has disabled ──
-      if (blockedSet.has(service.toLowerCase())) continue;
+     if (!includeHidden && blockedSet.has(service.toLowerCase())) continue;
 
       normalized[service] = {};
 
@@ -248,6 +250,7 @@ normalized[service][op] = {
 
   // Price shown to users and used for purchase
   Price: finalPrice,
+  isHidden: blockedSet.has(service.toLowerCase()),
 };
       }
     }
@@ -270,11 +273,11 @@ const buyNumber = async (req, res) => {
 
   try {
     const {
-      country,
-      operator = 'virtual',
-      product,
-      provider: preferredProviderId,
-    } = req.body;
+  country,
+  operator = 'virtual',
+} = req.params;
+
+const includeHidden = req.query.includeHidden === 'true';
 
     if (!country || !product) {
       return res.status(400).json({
@@ -479,7 +482,7 @@ const override = await PriceOverride.findOne({
     }
 
     return res.status(500).json({
-      message: error.message || 'Something went wrong while purchasing the number',
+      message: 'Service temporarily unavailable. Please try again or contact support.',
     });
   }
 };

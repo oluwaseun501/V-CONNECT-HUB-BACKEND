@@ -186,10 +186,10 @@ const korapayWebhook = async (req, res) => {
         const signature = req.headers['x-korapay-signature'];
         const rawBody = req.body;
 
-        const hash = require('crypto')
-            .createHmac('sha256', process.env.KORAPAY_SECRET_KEY)
-            .update(rawBody)
-            .digest('hex');
+       const hash = require('crypto')
+    .createHmac('sha512', process.env.KORAPAY_ENCRYPTION_KEY)
+    .update(rawBody)
+    .digest('hex');
 
         if (hash !== signature) {
             return res.status(400).json({ message: 'Invalid signature' });
