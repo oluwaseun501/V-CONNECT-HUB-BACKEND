@@ -274,7 +274,8 @@ normalized[service][op] = {
   let walletDebited = false;
 
   try {
-    const { product, preferredProviderId, country, operator = 'virtual' } = req.body;  
+   const { product, country, operator = 'virtual' } = req.body;
+const preferredProviderId = req.body.provider || req.body.preferredProviderId;
     const includeHidden = req.query.includeHidden === 'true';
 
     if (!country || !product) {
