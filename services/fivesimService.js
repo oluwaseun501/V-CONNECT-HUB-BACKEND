@@ -166,8 +166,8 @@ async function laomaoGetStatus(provider, orderId) {
 
   if (text === 'STATUS_WAIT_CODE') return { status: 'PENDING', sms: [] };
   if (text === 'STATUS_CANCEL')    return { status: 'CANCELED', sms: [] };
-  if (text.startsWith('STATUS_OK:') || text.startsWith('STATUS_WAIT_RETRY:')) {
-    const code = text.split(':')[1] || '';
+   if (text.startsWith('STATUS_OK:') || text.startsWith('STATUS_WAIT_RETRY:')) {
+    const code = text.slice(text.indexOf(':') + 1).trim();
     return { status: 'RECEIVED', sms: [{ created_at: new Date().toISOString(), date: Math.floor(Date.now() / 1000), sender: '', text: code, code }] };
   }
   if (text.includes('NO_ACTIVATION')) throw new Error(`Activation not found: ${orderId}`);
@@ -294,8 +294,14 @@ const purchaseNumber = async (country, operator, product) => {
 
   for (const provider of providers) {
     try {
-      if (adapterFor(provider) === 'laomao') return await laomaoGetNumber(provider, country, operator, product);
-      return await fivesimGetNumber(provider, country, operator, product);
+      let result;
+      if (adapterFor(provider) === 'laomao') {
+        result = await laomaoGetNumber(provider, country, operator, product);
+      } else {
+        result = await fivesimGetNumber(provider, country, operator, product);
+      }
+      result._providerBaseUrl = provider.baseUrl; // ← track which provider fulfilled it
+      return result;
     } catch (err) {
       if (err.isNoNumbers) {
         console.log(`[purchaseNumber] No numbers on ${provider.baseUrl} — trying next provider`);
@@ -322,8 +328,14 @@ const purchaseNumberFromProvider = async (country, operator, product, providerId
     throw new Error('Selected provider is no longer active. Please choose another option.');
   }
 
-  if (adapterFor(provider) === 'laomao') return laomaoGetNumber(provider, country, operator, product);
-  return fivesimGetNumber(provider, country, operator, product);
+  let result;
+  if (adapterFor(provider) === 'laomao') {
+    result = await laomaoGetNumber(provider, country, operator, product);
+  } else {
+    result = await fivesimGetNumber(provider, country, operator, product);
+  }
+  result._providerBaseUrl = provider.baseUrl; // ← track which provider fulfilled it
+  return result;
 };
 
 // Check SMS — route to the provider that owns this order

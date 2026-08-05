@@ -86,6 +86,11 @@ const virtualOrderSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+
+      providerBaseUrl: {
+      type: String,
+      default: null,
+    },
   },
   {
     timestamps: true,

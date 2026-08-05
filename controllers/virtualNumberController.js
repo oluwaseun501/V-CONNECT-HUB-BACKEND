@@ -428,19 +428,20 @@ const override = await PriceOverride.findOne({
     const expiresAt = new Date(purchasedAt.getTime() + ORDER_EXPIRY_MS);
 
     try {
-      const order = await VirtualOrder.create({
-        user:     req.user._id,
-        orderId:  orderData.id,
-        phone:    orderData.phone,
+         const order = await VirtualOrder.create({
+        user:            req.user._id,
+        orderId:         orderData.id,
+        phone:           orderData.phone,
         country,
-        operator: orderData.operator || operator,
+        operator:        orderData.operator || operator,
         product,
-        price:    finalPrice,
-        status:   normalize5simStatus(orderData.status) || 'PENDING',
+        price:           finalPrice,
+        status:          normalize5simStatus(orderData.status) || 'PENDING',
         expiresAt,
-        sms: [],
+        sms:             [],
+        providerBaseUrl: orderData._providerBaseUrl || provider.baseUrl, 
       });
-
+      
       return res.status(201).json({
         message: 'Number purchased successfully',
         order,
@@ -513,7 +514,7 @@ const checkSms = async (req, res) => {
       });
     }
 
-    const result = await checkOrder(Number(orderId));
+        const result = await checkOrder(Number(orderId), order.providerBaseUrl);
 
     if (result.status) {
       order.status = normalize5simStatus(result.status);
@@ -582,7 +583,7 @@ const cancelNumberOrder = async (req, res) => {
       return res.status(400).json({ message: 'Cannot cancel — order is no longer pending' });
     }
 
-    const liveOrder = await checkOrder(Number(orderId));
+        const liveOrder = await checkOrder(Number(orderId), order.providerBaseUrl);
     const liveStatus = normalize5simStatus(liveOrder.status);
 
     if (liveStatus) {
@@ -604,7 +605,7 @@ const cancelNumberOrder = async (req, res) => {
       return res.status(400).json({ message: 'Cannot cancel — order has expired' });
     }
 
-    await cancelOrder(Number(orderId));
+        await cancelOrder(Number(orderId), order.providerBaseUrl);
     order.status = 'CANCELED';
     await order.save();
 
@@ -646,7 +647,7 @@ const finishNumberOrder = async (req, res) => {
       return res.status(400).json({ message: 'Cannot finish an expired order' });
     }
 
-    await finishOrder(Number(orderId));
+        await finishOrder(Number(orderId), order.providerBaseUrl);
     order.status = 'FINISHED';
     await order.save();
 
