@@ -1,206 +1,372 @@
 const SMMProvider = require('../models/SMMProvider');
 const SMMService = require('../models/SMMService');
 const axios = require('axios');
+const { invalidateServicesCache } = require('../services/smmServicesCache');
 
-// GET all providers
-const getAllSMMProviders = async (req, res) => {
+function maskApiKey(apiKey) {
+    const value = String(apiKey || '');
+    return value.length > 6 ? `••••••${value.slice(-6)}` : '••••••';
+}
+
+function markedUpPrice(providerPrice, markupPercent) {
+    return Number(
+        (providerPrice * (1 + Number(markupPercent || 0) / 100)).toFixed(4)
+    );
+}
+
+async function getAllSMMProviders(req, res) {
     try {
-        const providers = await SMMProvider.find().sort({ createdAt: -1 });
-        const masked = providers.map(p => ({
-            ...p.toObject(),
-            apiKey: '••••••' + p.apiKey.slice(-6)
-        }));
-        res.status(200).json(masked);
+        const providers = await SMMProvider.find().sort({ createdAt: -1 }).lean();
+        return res.status(200).json(providers.map((provider) => ({
+            ...provider,
+            apiKey: maskApiKey(provider.apiKey),
+        })));
     } catch (error) {
-        res.status(500).json({ message: error.message });
+        return res.status(500).json({ message: error.message });
     }
-};
+}
 
-// POST add provider
-const addSMMProvider = async (req, res) => {
+async function addSMMProvider(req, res) {
     try {
         const { name, apiUrl, apiKey, markupPercent, notes } = req.body;
+
         if (!name || !apiUrl || !apiKey) {
-            return res.status(400).json({ message: 'name, apiUrl and apiKey are required' });
+            return res.status(400).json({
+                message: 'name, apiUrl and apiKey are required',
+            });
         }
-        const provider = await SMMProvider.create({ name, apiUrl, apiKey, markupPercent, notes });
-        res.status(201).json({
+
+        const provider = await SMMProvider.create({
+            name: String(name).trim(),
+            apiUrl: String(apiUrl).trim(),
+            apiKey,
+            markupPercent: Number(markupPercent || 0),
+            notes,
+        });
+
+        return res.status(201).json({
             message: 'SMM Provider added',
-            provider: { ...provider.toObject(), apiKey: '••••••' + provider.apiKey.slice(-6) }
+            provider: {
+                ...provider.toObject(),
+                apiKey: maskApiKey(provider.apiKey),
+            },
         });
     } catch (error) {
-        if (error.code === 11000) return res.status(400).json({ message: 'Provider with that name already exists' });
-        res.status(500).json({ message: error.message });
-    }
-};
+        if (error.code === 11000) {
+            return res.status(400).json({
+                message: 'Provider with that name already exists',
+            });
+        }
 
-// PUT update provider
-const updateSMMProvider = async (req, res) => {
+        return res.status(500).json({ message: error.message });
+    }
+}
+
+async function updateSMMProvider(req, res) {
     try {
         const { name, apiUrl, apiKey, markupPercent, notes } = req.body;
         const update = {};
-        if (name) update.name = name;
-        if (apiUrl) update.apiUrl = apiUrl;
+
+        if (name) update.name = String(name).trim();
+        if (apiUrl) update.apiUrl = String(apiUrl).trim();
         if (apiKey) update.apiKey = apiKey;
-        if (markupPercent !== undefined) update.markupPercent = markupPercent;
+        if (markupPercent !== undefined) update.markupPercent = Number(markupPercent);
         if (notes !== undefined) update.notes = notes;
 
-        const provider = await SMMProvider.findByIdAndUpdate(req.params.id, update, { new: true });
-        if (!provider) return res.status(404).json({ message: 'Provider not found' });
-        res.status(200).json({
-            message: 'Provider updated',
-            provider: { ...provider.toObject(), apiKey: '••••••' + provider.apiKey.slice(-6) }
+        const provider = await SMMProvider.findByIdAndUpdate(
+            req.params.id,
+            update,
+            { new: true, runValidators: true }
+        );
+
+        if (!provider) {
+            return res.status(404).json({ message: 'Provider not found' });
+        }
+
+        return res.status(200).json({
+            message: 'Provider updated. Sync services to apply the new markup.',
+            provider: {
+                ...provider.toObject(),
+                apiKey: maskApiKey(provider.apiKey),
+            },
         });
     } catch (error) {
-        res.status(500).json({ message: error.message });
+        return res.status(500).json({ message: error.message });
     }
-};
+}
 
-// PATCH activate provider
-const setActiveSMMProvider = async (req, res) => {
+async function setActiveSMMProvider(req, res) {
     try {
-        await SMMProvider.updateMany({}, { isActive: false });
-        const provider = await SMMProvider.findByIdAndUpdate(req.params.id, { isActive: true }, { new: true });
-        if (!provider) return res.status(404).json({ message: 'Provider not found' });
-        res.status(200).json({ message: `${provider.name} is now the active SMM provider` });
-    } catch (error) {
-        res.status(500).json({ message: error.message });
-    }
-};
+        const provider = await SMMProvider.findById(req.params.id);
 
-// DELETE provider
-const deleteSMMProvider = async (req, res) => {
+        if (!provider) {
+            return res.status(404).json({ message: 'Provider not found' });
+        }
+
+        await SMMProvider.updateMany({}, { $set: { isActive: false } });
+        provider.isActive = true;
+        await provider.save();
+        invalidateServicesCache();
+
+        return res.status(200).json({
+            message: `${provider.name} is now the active SMM provider`,
+        });
+    } catch (error) {
+        return res.status(500).json({ message: error.message });
+    }
+}
+
+async function deleteSMMProvider(req, res) {
     try {
         const provider = await SMMProvider.findByIdAndDelete(req.params.id);
-        if (!provider) return res.status(404).json({ message: 'Provider not found' });
-        await SMMService.deleteMany({ provider: req.params.id }); // clean up services
-        res.status(200).json({ message: 'Provider deleted' });
-    } catch (error) {
-        res.status(500).json({ message: error.message });
-    }
-};
 
-// POST sync services from active provider
-const syncSMMServices = async (req, res) => {
+        if (!provider) {
+            return res.status(404).json({ message: 'Provider not found' });
+        }
+
+        await SMMService.deleteMany({ provider: provider._id });
+        invalidateServicesCache();
+
+        return res.status(200).json({ message: 'Provider deleted' });
+    } catch (error) {
+        return res.status(500).json({ message: error.message });
+    }
+}
+
+async function syncSMMServices(req, res) {
     try {
         const provider = await SMMProvider.findOne({ isActive: true });
-        if (!provider) return res.status(404).json({ message: 'No active SMM provider found' });
+
+        if (!provider) {
+            return res.status(404).json({ message: 'No active SMM provider found' });
+        }
 
         const response = await axios.post(
             provider.apiUrl,
-            new URLSearchParams({ key: provider.apiKey, action: 'services' }),
+            new URLSearchParams({
+                key: provider.apiKey,
+                action: 'services',
+            }),
             {
                 headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                timeout: 30000 // 30s timeout for provider API call
+                timeout: 30000,
+                validateStatus: () => true,
             }
         );
 
-        const services = response.data;
-        if (!Array.isArray(services)) {
-            return res.status(400).json({ message: 'Unexpected response from provider' });
+        if (response.status >= 500) {
+            return res.status(503).json({
+                message: 'The boosting provider is temporarily unavailable.',
+            });
         }
 
-        const markup = provider.markupPercent || 0;
+        if (!Array.isArray(response.data)) {
+            return res.status(502).json({
+                message: response.data?.error ||
+                    'The provider returned an invalid service list.',
+            });
+        }
 
-        const bulkOps = services.map(s => {
-            const providerPrice = parseFloat(s.rate);
-            const markedUpPrice = parseFloat((providerPrice * (1 + markup / 100)).toFixed(4));
+        const services = response.data
+            .map((service) => ({
+                providerServiceId: Number(service.service),
+                name: String(service.name || '').trim(),
+                category: String(service.category || 'Other').trim(),
+                providerPrice: Number(service.rate),
+                minOrder: Number(service.min),
+                maxOrder: Number(service.max),
+                canCancel: service.cancel === true ||
+                    service.cancel === 1 ||
+                    String(service.cancel).toLowerCase() === 'true' ||
+                    String(service.cancel) === '1',
+            }))
+            .filter((service) =>
+                Number.isInteger(service.providerServiceId) &&
+                service.name &&
+                Number.isFinite(service.providerPrice) &&
+                service.providerPrice >= 0 &&
+                Number.isInteger(service.minOrder) &&
+                Number.isInteger(service.maxOrder)
+            );
+
+        const existing = await SMMService.find({
+            provider: provider._id,
+            serviceId: { $in: services.map((service) => service.providerServiceId) },
+        }).select('serviceId customPrice priceSource').lean();
+
+        const existingByServiceId = new Map(
+            existing.map((service) => [Number(service.serviceId), service])
+        );
+
+        const bulkOps = services.map((service) => {
+            const current = existingByServiceId.get(service.providerServiceId);
+            const isManual = current?.priceSource === 'manual';
+            const automaticPrice = markedUpPrice(
+                service.providerPrice,
+                provider.markupPercent
+            );
 
             return {
                 updateOne: {
-                    filter: { provider: provider._id, serviceId: s.service },
+                    filter: {
+                        provider: provider._id,
+                        serviceId: service.providerServiceId,
+                    },
                     update: {
                         $set: {
-                            name: s.name,
-                            category: s.category,
-                            providerPrice,
-                            minOrder: s.min,
-                            maxOrder: s.max,
+                            name: service.name,
+                            category: service.category,
+                            providerPrice: service.providerPrice,
+                            minOrder: service.minOrder,
+                            maxOrder: service.maxOrder,
+                            canCancel: service.canCancel,
+                            // Manual prices survive future syncs. Services that
+                            // have never been manually edited follow markup.
+                            customPrice: isManual
+                                ? current.customPrice
+                                : automaticPrice,
+                            priceSource: isManual ? 'manual' : 'markup',
                         },
                         $setOnInsert: {
-                            // Only set customPrice on NEW services — don't overwrite admin-set prices
-                            customPrice: markedUpPrice,
+                            provider: provider._id,
+                            serviceId: service.providerServiceId,
                             isEnabled: true,
-                        }
+                        },
                     },
-                    upsert: true
-                }
+                    upsert: true,
+                },
             };
         });
 
-        const result = await SMMService.bulkWrite(bulkOps, { ordered: false });
+        const result = bulkOps.length
+            ? await SMMService.bulkWrite(bulkOps, { ordered: false })
+            : { upsertedCount: 0, modifiedCount: 0 };
 
-        res.status(200).json({
-            message: `Sync complete — ${result.upsertedCount} added, ${result.modifiedCount} updated`
+        invalidateServicesCache();
+
+        return res.status(200).json({
+            message: `Sync complete — ${result.upsertedCount || 0} added, ${result.modifiedCount || 0} updated`,
+            servicesReceived: response.data.length,
+            servicesSynced: services.length,
         });
     } catch (error) {
-        res.status(500).json({ message: error.message });
+        return res.status(500).json({ message: error.message });
     }
-};
+}
 
-const updateSMMService = async (req, res) => {
+async function updateSMMService(req, res) {
     try {
-        const { customPrice, isEnabled } = req.body;
+        const { customPrice, isEnabled, priceSource } = req.body;
         const update = {};
-        if (customPrice !== undefined) update.customPrice = customPrice;
-        if (isEnabled !== undefined) update.isEnabled = isEnabled;
-        const service = await SMMService.findByIdAndUpdate(req.params.id, update, { new: true });
-        if (!service) return res.status(404).json({ message: 'Service not found' });
-        res.status(200).json({ message: 'Service updated', service });
+
+        if (customPrice !== undefined) {
+            const numericPrice = Number(customPrice);
+            if (!Number.isFinite(numericPrice) || numericPrice < 0) {
+                return res.status(400).json({
+                    message: 'customPrice must be a valid non-negative number',
+                });
+            }
+
+            update.customPrice = numericPrice;
+            update.priceSource = priceSource === 'markup' ? 'markup' : 'manual';
+        }
+
+        if (priceSource === 'markup') {
+            const service = await SMMService.findById(req.params.id).populate('provider');
+            if (!service) {
+                return res.status(404).json({ message: 'Service not found' });
+            }
+
+            update.customPrice = markedUpPrice(
+                service.providerPrice,
+                service.provider?.markupPercent
+            );
+            update.priceSource = 'markup';
+        }
+
+        if (isEnabled !== undefined) {
+            update.isEnabled = Boolean(isEnabled);
+        }
+
+        if (!Object.keys(update).length) {
+            return res.status(400).json({ message: 'No service changes provided' });
+        }
+
+        const service = await SMMService.findByIdAndUpdate(
+            req.params.id,
+            update,
+            { new: true, runValidators: true }
+        );
+
+        if (!service) {
+            return res.status(404).json({ message: 'Service not found' });
+        }
+
+        invalidateServicesCache();
+        return res.status(200).json({
+            message: 'Service updated',
+            service,
+        });
     } catch (error) {
-        res.status(500).json({ message: error.message });
+        return res.status(500).json({ message: error.message });
     }
-};
-const getSMMServices = async (req, res) => {
+}
+
+async function getSMMServices(req, res) {
     try {
-        const page     = parseInt(req.query.page)  || 1;
-        const limit    = parseInt(req.query.limit) || 50;
-        const search   = req.query.search   || '';
-        const category = req.query.category || '';
-        const skip     = (page - 1) * limit;
+        const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+        const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 100);
+        const search = String(req.query.search || '');
+        const category = String(req.query.category || '');
+        const activeProvider = await SMMProvider.findOne({ isActive: true }).lean();
+        const filter = activeProvider ? { provider: activeProvider._id } : { _id: null };
 
-        // ← NEW: only show services from the currently active provider
-        const activeProvider = await SMMProvider.findOne({ isActive: true });
-
-        const filter = {};
-        if (activeProvider) filter.provider = activeProvider._id;  // ← NEW
-        if (search)   filter.name     = { $regex: search, $options: 'i' };
+        if (search) filter.name = { $regex: search, $options: 'i' };
         if (category) filter.category = { $regex: category, $options: 'i' };
 
         const [services, total] = await Promise.all([
             SMMService.find(filter)
-                .populate('provider', 'name')
+                .populate('provider', 'name markupPercent')
                 .sort({ category: 1, name: 1 })
-                .skip(skip)
-                .limit(limit),
-            SMMService.countDocuments(filter)
+                .skip((page - 1) * limit)
+                .limit(limit)
+                .lean(),
+            SMMService.countDocuments(filter),
         ]);
 
-        res.status(200).json({
+        return res.status(200).json({
             services,
             total,
             page,
-            pages: Math.ceil(total / limit)
+            pages: Math.max(Math.ceil(total / limit), 1),
         });
     } catch (error) {
-        res.status(500).json({ message: error.message });
+        return res.status(500).json({ message: error.message });
     }
-};
-const getSMMCategories = async (req, res) => {
+}
+
+async function getSMMCategories(req, res) {
     try {
-        // ← NEW: filter by active provider
-        const activeProvider = await SMMProvider.findOne({ isActive: true });
-        const filter = activeProvider ? { provider: activeProvider._id } : {};
-        
-        const categories = await SMMService.distinct('category', filter);
-        res.status(200).json(categories.sort());
+        const activeProvider = await SMMProvider.findOne({ isActive: true }).lean();
+        const categories = await SMMService.distinct(
+            'category',
+            activeProvider ? { provider: activeProvider._id } : { _id: null }
+        );
+
+        return res.status(200).json(categories.filter(Boolean).sort());
     } catch (error) {
-        res.status(500).json({ message: error.message });
+        return res.status(500).json({ message: error.message });
     }
-};
+}
 
 module.exports = {
-    getAllSMMProviders, addSMMProvider, updateSMMProvider,
-    setActiveSMMProvider, deleteSMMProvider,
-    syncSMMServices, getSMMServices, getSMMCategories, updateSMMService
+    getAllSMMProviders,
+    addSMMProvider,
+    updateSMMProvider,
+    setActiveSMMProvider,
+    deleteSMMProvider,
+    syncSMMServices,
+    getSMMServices,
+    getSMMCategories,
+    updateSMMService,
 };

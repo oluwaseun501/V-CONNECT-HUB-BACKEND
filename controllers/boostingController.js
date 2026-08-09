@@ -1,51 +1,58 @@
-// Boosting order controller
-//
-// This is the backend file used by:
-//   GET  /boost/services
-//   GET  /boost/orders
-//   POST /boost/order
-//   GET  /boost/orders/:id
-//
-// The boosting page already sends the transaction PIN in the
-// x-transaction-pin header. This controller validates that PIN, protects the
-// wallet, checks the active SMM provider, and submits form-encoded requests.
-
 const SMMService = require('../models/SMMService');
 const SMMProvider = require('../models/SMMProvider');
 const BoostOrder = require('../models/BoostOrder');
 const SiteConfig = require('../models/SiteConfig');
 const User = require('../models/User');
-const { debitWallet, creditWallet } = require('../services/walletService');
-const axios = require('axios');
+const bcrypt = require("bcryptjs");
+const { debitWallet } = require('../services/walletService');
+const { refundBoostOrder } = require('../services/smmRefundService');
+const {
+    providerRequest,
+    getProviderError,
+    isProviderUnavailable,
+    hasProviderOrder,
+    getProviderBalance,
+    cancelProviderOrder,
+    normalizeProviderStatus,
+} = require('../services/smmProviderApi');
+const {
+    getCachedServices,
+    setCachedServices,
+} = require('../services/smmServicesCache');
 
-let servicesCache = null;
-let servicesCacheAt = 0;
-
-const CACHE_TTL_MS = 5 * 60 * 1000;
-const PROVIDER_TIMEOUT_MS = 30 * 1000;
 const DUPLICATE_ORDER_WINDOW_MS = 5 * 60 * 1000;
+const USER_CANCEL_WINDOW_MS = 2 * 60 * 1000;
 
-class ProviderRejectedError extends Error {
-    constructor(message) {
-        super(message);
-        this.name = 'ProviderRejectedError';
-    }
-}
+function publicOrder(order) {
+    const raw = typeof order.toObject === 'function' ? order.toObject() : { ...order };
+    const quantity = Number(raw.quantity);
+    const remains = Number(raw.remains);
+    const progressPercent = Number.isFinite(Number(raw.progressPercent))
+        ? Number(raw.progressPercent)
+        : Number.isFinite(remains) && quantity > 0
+            ? Math.min(100, Math.max(0, ((quantity - remains) / quantity) * 100))
+            : null;
 
-class ProviderUnavailableError extends Error {
-    constructor(message) {
-        super(message);
-        this.name = 'ProviderUnavailableError';
-    }
-}
-
-function invalidateServicesCache() {
-    servicesCache = null;
-    servicesCacheAt = 0;
+    return {
+        ...raw,
+        progressPercent: progressPercent === null
+            ? null
+            : Number(progressPercent.toFixed(2)),
+        delivered: Number.isFinite(remains)
+            ? Math.max(0, quantity - remains)
+            : raw.delivered,
+        canUserCancel: (
+            ['pending', 'processing'].includes(String(raw.status)) &&
+            raw.providerCanCancel === true &&
+            Date.now() - new Date(raw.createdAt).getTime() <= USER_CANCEL_WINDOW_MS &&
+            !raw.cancelRequestedAt &&
+            !raw.refunded
+        ),
+    };
 }
 
 async function getNgnRate() {
-    const siteConfig = await SiteConfig.findOne();
+    const siteConfig = await SiteConfig.findOne().lean();
     const rate = Number(siteConfig?.usdToNgn ?? 1600);
 
     if (!Number.isFinite(rate) || rate <= 0) {
@@ -55,82 +62,33 @@ async function getNgnRate() {
     return rate;
 }
 
-function getProviderError(data) {
-    if (!data) return 'Provider rejected the request';
-    if (typeof data === 'string') return data;
-    return data.error || data.message || 'Provider rejected the request';
+async function getActiveProvider() {
+    return SMMProvider.findOne({ isActive: true }).lean();
 }
 
-function providerRequest(provider, values) {
-    const form = new URLSearchParams();
-
-    for (const [key, value] of Object.entries(values)) {
-        form.append(key, String(value));
-    }
-
-    return axios.post(provider.apiUrl, form, {
-        headers: {
-            'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        timeout: PROVIDER_TIMEOUT_MS,
-        // We inspect the provider response ourselves so provider error bodies
-        // are handled consistently.
-        validateStatus: () => true,
-    });
-}
-
-function hasProviderOrder(data) {
-    return data?.order !== undefined &&
-        data?.order !== null &&
-        String(data.order).trim() !== '';
-}
-
-function normalizeStatus(status) {
-    const value = String(status || '').toLowerCase();
-    return value === 'canceled' ? 'cancelled' : value;
-}
-
-async function checkProviderBalance(provider, service, quantity) {
-    const response = await providerRequest(provider, {
-        key: provider.apiKey,
-        action: 'balance',
-    });
-
-    if (response.status >= 500) {
-        throw new ProviderUnavailableError('Provider balance endpoint is unavailable');
-    }
-
-    const balance = Number(response.data?.balance);
-    if (response.data?.error || !Number.isFinite(balance)) {
-        throw new ProviderRejectedError(getProviderError(response.data));
-    }
-
-    const providerPrice = Number(service.providerPrice);
-    const providerCost = (providerPrice / 1000) * quantity;
-
-    if (!Number.isFinite(providerPrice) || providerPrice < 0) {
-        throw new ProviderUnavailableError('Provider service price is not configured');
-    }
-
-    if (balance < providerCost) {
-        throw new ProviderRejectedError('Provider balance is too low');
-    }
-}
-
-// GET all enabled services — prices returned in NGN
-const getPublicServices = async (req, res) => {
+async function getPublicServices(req, res) {
     try {
-        if (servicesCache && Date.now() - servicesCacheAt < CACHE_TTL_MS) {
-            return res.status(200).json(servicesCache);
+        const cached = getCachedServices();
+        if (cached) return res.status(200).json(cached);
+
+        const [usdToNgn, provider] = await Promise.all([
+            getNgnRate(),
+            getActiveProvider(),
+        ]);
+
+        if (!provider) {
+            return res.status(503).json({
+                message: 'Boost services are temporarily unavailable.',
+            });
         }
 
-        const [usdToNgn, services] = await Promise.all([
-            getNgnRate(),
-            SMMService.find({ isEnabled: true })
-                .select('serviceId name category customPrice providerPrice minOrder maxOrder')
-                .sort({ category: 1 })
-                .lean(),
-        ]);
+        const services = await SMMService.find({
+            provider: provider._id,
+            isEnabled: true,
+        })
+            .select('serviceId name category customPrice providerPrice minOrder maxOrder canCancel')
+            .sort({ category: 1, name: 1 })
+            .lean();
 
         const publicServices = services
             .map((service) => {
@@ -145,22 +103,23 @@ const getPublicServices = async (req, res) => {
                     category: service.category,
                     minOrder: service.minOrder,
                     maxOrder: service.maxOrder,
+                    canCancel: service.canCancel === true,
                     ngnPrice: Number((pricePerThousand * usdToNgn).toFixed(2)),
                 };
             })
-            .filter((service) => Number.isFinite(service.ngnPrice));
+            .filter((service) =>
+                Number.isFinite(service.ngnPrice) &&
+                service.ngnPrice > 0
+            );
 
-        servicesCache = publicServices;
-        servicesCacheAt = Date.now();
-
+        setCachedServices(publicServices);
         return res.status(200).json(publicServices);
     } catch (error) {
         return res.status(500).json({ message: error.message });
     }
-};
+}
 
-// POST place an order
-const placeOrder = async (req, res) => {
+async function placeOrder(req, res) {
     let order;
     let amount = 0;
 
@@ -183,25 +142,52 @@ const placeOrder = async (req, res) => {
             });
         }
 
-        // This is the server-side PIN check. The frontend PIN field alone is
-        // not security; every order must be checked here.
-        if (!/^\d{4}$/.test(pin)) {
-            return res.status(401).json({
-                message: 'Enter your 4-digit transaction PIN',
-            });
-        }
+if (!/^\d{4}$/.test(pin)) {
+    return res.status(400).json({
+        message: "Enter your 4-digit transaction PIN",
+        code: "INVALID_TRANSACTION_PIN",
+    });
+}
 
-        if (!req.user?.transactionPin ||
-            pin !== String(req.user.transactionPin)) {
-            return res.status(401).json({
-                message: 'Invalid transaction PIN',
-            });
-        }
+const storedPin = String(req.user?.transactionPin ?? "").trim();
 
-        const service = await SMMService.findById(serviceId).lean();
+if (!storedPin) {
+    return res.status(400).json({
+        message: "Please set a transaction PIN before placing an order",
+        code: "TRANSACTION_PIN_NOT_SET",
+    });
+}
+
+const pinMatches = await bcrypt.compare(pin, storedPin);
+
+if (!pinMatches) {
+    return res.status(400).json({
+        message: "Invalid transaction PIN",
+        code: "INVALID_TRANSACTION_PIN",
+    });
+}
+
+        const [service, usdToNgn, provider] = await Promise.all([
+            SMMService.findById(serviceId).lean(),
+            getNgnRate(),
+            getActiveProvider(),
+        ]);
+
         if (!service || !service.isEnabled) {
             return res.status(404).json({
                 message: 'Service not found or unavailable',
+            });
+        }
+
+        if (!provider) {
+            return res.status(503).json({
+                message: 'Boost services are temporarily unavailable. Please try again later.',
+            });
+        }
+
+        if (String(service.provider) !== String(provider._id)) {
+            return res.status(503).json({
+                message: 'This service is no longer available. Please refresh and try again.',
             });
         }
 
@@ -218,47 +204,19 @@ const placeOrder = async (req, res) => {
             });
         }
 
-        const [usdToNgn, provider] = await Promise.all([
-            getNgnRate(),
-            SMMProvider.findOne({ isActive: true }).lean(),
-        ]);
-
-        if (!provider) {
-            return res.status(503).json({
-                message: 'Boost services are temporarily unavailable. Please try again later.',
-            });
-        }
-
-        // Do not send a service synced from another provider to the active
-        // provider.
-        if (!service.provider ||
-            String(service.provider) !== String(provider._id)) {
-            return res.status(503).json({
-                message: 'This service is not available from the active provider.',
-            });
-        }
-
+        const providerPrice = Number(service.providerPrice);
         const pricePerThousand = Number(
             service.customPrice ?? service.providerPrice
         );
-        if (!Number.isFinite(pricePerThousand) || pricePerThousand < 0) {
+        const providerCost = (providerPrice / 1000) * parsedQuantity;
+
+        if (!Number.isFinite(providerPrice) || providerPrice <= 0 ||
+            !Number.isFinite(pricePerThousand) || pricePerThousand <= 0) {
             return res.status(503).json({
-                message: 'This service is not correctly configured.',
+                message: 'This service is temporarily unavailable. Please try again later.',
             });
         }
 
-        amount = Number(
-            ((pricePerThousand * usdToNgn / 1000) * parsedQuantity).toFixed(2)
-        );
-
-        if (!Number.isFinite(amount) || amount <= 0) {
-            return res.status(400).json({
-                message: 'Unable to calculate the order charge',
-            });
-        }
-
-        // Stop accidental double-clicks or repeated requests from creating
-        // duplicate provider orders.
         const duplicate = await BoostOrder.findOne({
             user: req.user._id,
             service: service._id,
@@ -277,32 +235,49 @@ const placeOrder = async (req, res) => {
             });
         }
 
-        // Make sure the provider has funds before reserving the customer's
-        // money.
         try {
-            await checkProviderBalance(provider, service, parsedQuantity);
-        } catch (error) {
-            if (error instanceof ProviderRejectedError) {
+            const providerBalance = await getProviderBalance(provider);
+            if (providerBalance.balance < providerCost) {
                 return res.status(503).json({
-                    message: 'The boosting provider is currently unavailable. Please try again later.',
+                    message: 'This service is temporarily unavailable. Please try again later.',
+                });
+            }
+        } catch (error) {
+            if (error.code === 'PROVIDER_REJECTED' ||
+                error.code === 'PROVIDER_UNAVAILABLE') {
+                return res.status(503).json({
+                    message: 'This service is temporarily unavailable. Please try again later.',
                 });
             }
             throw error;
         }
 
-        // debitWallet performs an atomic "balance >= amount" update.
+        amount = Number(
+            ((pricePerThousand * usdToNgn / 1000) * parsedQuantity).toFixed(2)
+        );
+
+        if (!Number.isFinite(amount) || amount <= 0) {
+            return res.status(400).json({
+                message: 'Unable to calculate the order charge',
+            });
+        }
+
         await debitWallet(req.user._id, amount, `Boost - ${service.name}`);
 
         try {
             order = await BoostOrder.create({
                 user: req.user._id,
+                provider: provider._id,
                 service: service._id,
                 link: link.trim(),
                 quantity: parsedQuantity,
                 amount,
+                providerCanCancel: service.canCancel === true,
                 status: 'pending',
             });
         } catch (error) {
+            // There is no provider order yet, so a direct refund is safe.
+            const { creditWallet } = require('../services/walletService');
             await creditWallet(
                 req.user._id,
                 amount,
@@ -321,42 +296,37 @@ const placeOrder = async (req, res) => {
                 quantity: parsedQuantity,
             });
         } catch (error) {
-            // A timeout may happen after the provider accepted the order.
-            // Keep it pending rather than refunding and risking a duplicate.
+            // The provider might have accepted the request before the timeout.
+            // Keep it pending and let an admin review/reconcile it.
             return res.status(202).json({
                 message: 'Order is pending provider confirmation. Please check My Orders shortly.',
-                order,
+                order: publicOrder(order),
             });
         }
 
-        if (providerResponse.status >= 500) {
+        if (isProviderUnavailable(providerResponse)) {
             return res.status(202).json({
                 message: 'Order is pending provider confirmation. Please check My Orders shortly.',
-                order,
+                order: publicOrder(order),
             });
         }
 
         if (!hasProviderOrder(providerResponse.data)) {
             const providerMessage = getProviderError(providerResponse.data);
-
-            await creditWallet(
-                req.user._id,
-                amount,
-                'Refund - Boost order rejected'
-            );
-
             order.status = 'failed';
             await order.save();
+            await refundBoostOrder(order._id, 'Refund - Boost order rejected');
 
             return res.status(503).json({
                 message: providerMessage.toLowerCase().includes('balance')
-                    ? 'The boosting provider is currently out of funds. Please try again later.'
+                    ? 'This service is temporarily unavailable. Please try again later.'
                     : 'The provider rejected this order. Your wallet has been refunded.',
             });
         }
 
         order.providerOrderId = String(providerResponse.data.order);
         order.status = 'processing';
+        order.lastStatusCheckAt = new Date();
         await order.save();
 
         const updatedUser = await User.findById(req.user._id)
@@ -365,7 +335,7 @@ const placeOrder = async (req, res) => {
 
         return res.status(201).json({
             message: 'Order placed successfully',
-            order,
+            order: publicOrder(order),
             balance: updatedUser?.balance,
         });
     } catch (error) {
@@ -375,84 +345,178 @@ const placeOrder = async (req, res) => {
             });
         }
 
-        if (error instanceof ProviderUnavailableError) {
-            return res.status(503).json({
-                message: 'The boosting provider is temporarily unavailable. Please try again later.',
-            });
-        }
-
-        console.error('[boost] Order placement error:', error);
         return res.status(500).json({
             message: 'Unable to place the order right now. Please try again.',
         });
     }
-};
+}
 
-// GET check single order status
-const getOrderStatus = async (req, res) => {
+async function applyProviderStatus(order, data) {
+    const normalized = normalizeProviderStatus(data?.status);
+    const remains = data?.remains === undefined
+        ? order.remains
+        : Number(data.remains);
+    const startCount = data?.start_count === undefined
+        ? order.startCount
+        : Number(data.start_count);
+    const delivered = Number.isFinite(Number(remains))
+        ? Math.max(0, order.quantity - Number(remains))
+        : order.delivered;
+    const progressPercent = Number.isFinite(Number(remains)) && order.quantity > 0
+        ? Math.min(100, Math.max(0, ((order.quantity - Number(remains)) / order.quantity) * 100))
+        : normalized === 'completed'
+            ? 100
+            : order.progressPercent;
+
+    if (normalized) order.status = normalized;
+    if (Number.isFinite(Number(remains))) order.remains = Number(remains);
+    if (Number.isFinite(Number(startCount))) order.startCount = Number(startCount);
+    if (Number.isFinite(Number(delivered))) order.delivered = delivered;
+    if (Number.isFinite(Number(progressPercent))) {
+        order.progressPercent = Number(progressPercent.toFixed(2));
+    }
+    if (data?.charge !== undefined) order.providerCharge = Number(data.charge);
+    if (data?.currency) order.providerCurrency = data.currency;
+    order.lastProviderStatus = data?.status;
+    order.lastStatusCheckAt = new Date();
+
+    await order.save();
+
+    if (['cancelled', 'failed'].includes(order.status) && !order.refunded) {
+        await refundBoostOrder(
+            order._id,
+            `Refund - Boost order ${order.status}`
+        );
+    }
+
+    return order;
+}
+
+async function getOrderStatus(req, res) {
     try {
         const order = await BoostOrder.findOne({
             _id: req.params.id,
             user: req.user._id,
         }).populate('service', 'name category');
 
-        if (!order) {
-            return res.status(404).json({ message: 'Order not found' });
-        }
+        if (!order) return res.status(404).json({ message: 'Order not found' });
 
-        const provider = await SMMProvider.findOne({ isActive: true }).lean();
-        if (provider && order.providerOrderId) {
+        const provider = order.provider
+            ? await SMMProvider.findById(order.provider).lean()
+            : await getActiveProvider();
+
+        if (provider && order.providerOrderId &&
+            ['pending', 'processing'].includes(order.status)) {
             const response = await providerRequest(provider, {
                 key: provider.apiKey,
                 action: 'status',
                 order: order.providerOrderId,
             });
 
-            if (response.status >= 500 || response.data?.error) {
-                return res.status(502).json({
-                    message: 'Provider status is temporarily unavailable.',
-                });
+            if (!isProviderUnavailable(response) && !response.data?.error) {
+                await applyProviderStatus(order, response.data);
             }
-
-            const status = normalizeStatus(response.data?.status);
-            if (status) order.status = status;
-            if (response.data?.remains !== undefined) {
-                order.remains = response.data.remains;
-            }
-            if (response.data?.start_count !== undefined) {
-                order.startCount = response.data.start_count;
-            }
-            await order.save();
         }
 
-        return res.status(200).json({ order });
+        return res.status(200).json({ order: publicOrder(order) });
     } catch (error) {
-        return res.status(500).json({
-            message: 'Unable to load order status',
-        });
+        return res.status(500).json({ message: 'Unable to load order status' });
     }
-};
+}
 
-// GET user's order history
-const getMyOrders = async (req, res) => {
+async function getMyOrders(req, res) {
     try {
         const orders = await BoostOrder.find({ user: req.user._id })
             .populate('service', 'name category')
             .sort({ createdAt: -1 })
             .lean();
 
-        return res.status(200).json({ orders });
+        return res.status(200).json({ orders: orders.map(publicOrder) });
+    } catch (error) {
+        return res.status(500).json({ message: 'Unable to load order history' });
+    }
+}
+
+async function cancelMyOrder(req, res) {
+    try {
+        const order = await BoostOrder.findOne({
+            _id: req.params.id,
+            user: req.user._id,
+        }).populate('service', 'name canCancel');
+
+        if (!order) return res.status(404).json({ message: 'Order not found' });
+
+        const age = Date.now() - new Date(order.createdAt).getTime();
+        if (age > USER_CANCEL_WINDOW_MS) {
+            return res.status(400).json({
+                message: 'This order can no longer be cancelled.',
+            });
+        }
+
+        if (!order.providerCanCancel || !order.providerOrderId) {
+            return res.status(400).json({
+                message: 'This service cannot be cancelled at this stage.',
+            });
+        }
+
+        if (!['pending', 'processing'].includes(order.status) || order.refunded) {
+            return res.status(400).json({
+                message: 'This order can no longer be cancelled.',
+            });
+        }
+
+        const provider = await SMMProvider.findById(order.provider).lean();
+        if (!provider) {
+            return res.status(503).json({
+                message: 'The boosting provider is temporarily unavailable.',
+            });
+        }
+
+        order.cancelRequestedAt = new Date();
+        order.cancellationSource = 'user';
+        await order.save();
+
+        let result;
+        try {
+            result = await cancelProviderOrder(provider, order.providerOrderId);
+        } catch (error) {
+            return res.status(202).json({
+                message: 'Cancellation is pending provider confirmation.',
+                order: publicOrder(order),
+            });
+        }
+
+        if (!result.accepted) {
+            order.cancelRequestedAt = undefined;
+            await order.save();
+            return res.status(409).json({
+                message: 'The provider could not cancel this order.',
+            });
+        }
+
+        order.status = 'cancelled';
+        await order.save();
+        await refundBoostOrder(order._id, 'Refund - Customer cancelled boost order');
+
+        await order.populate('service', 'name category');
+        return res.status(200).json({
+            message: 'Order cancelled and refunded.',
+            order: publicOrder(order),
+        });
     } catch (error) {
         return res.status(500).json({
-            message: 'Unable to load order history',
+            message: 'Unable to cancel this order right now.',
         });
     }
-};
+}
 
 module.exports = {
     getPublicServices,
     placeOrder,
     getOrderStatus,
     getMyOrders,
-    invalidateServicesCache,
+    cancelMyOrder,
+    applyProviderStatus,
+    publicOrder,
+    USER_CANCEL_WINDOW_MS,
 };

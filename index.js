@@ -24,12 +24,15 @@ const rateLimit            = require('express-rate-limit');
 const smmProviderRoutes    = require('./routes/smmProviderRoutes');
 const boostingRoutes       = require('./routes/boostingRoutes');
 const { startAutoRefundJob } = require('./services/autoRefundJob');
+const adminBoostOrderRoutes = require('./routes/adminBoostOrderRoutes');
+const { startSMMStatusJob } = require('./services/smmStatusJob');
 
 
 // Connect DB and start background jobs
 connectDB().then(() => {
     startOrderCron();
     startAutoRefundJob();
+    startSMMStatusJob();
 }).catch((err) => {
     console.error('DB connection failed:', err.message);
     process.exit(1);
@@ -60,6 +63,8 @@ app.use(rateLimit({
     message: { message: 'Too many requests, please try again later' }
 }));
 
+
+
 app.use('/api/wallet/webhook/paystack', express.raw({ type: 'application/json' }));
 app.use('/api/wallet/webhook/korapay', express.raw({ type: 'application/json' }));
 app.use(express.json());
@@ -67,6 +72,7 @@ app.use(express.urlencoded({ extended: true }));
 
 app.use('/api/admin/smm-providers', smmProviderRoutes);
 app.use('/boost', boostingRoutes);
+app.use('/api/admin/boost-orders', adminBoostOrderRoutes);
 
 app.use('/api/users', authRoutes);
 app.use('/api/wallet', walletRoutes);
